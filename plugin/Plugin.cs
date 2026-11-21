@@ -13,16 +13,18 @@ using HarmonyLib;
 
 namespace AyceOc2Bridge;
 
-[BepInPlugin(Id, "AYCE OC2 Bridge", "0.1.1")]
+[BepInPlugin(Id, "AYCE OC2 Bridge", "0.2.0")]
 public sealed class Plugin : BasePlugin
 {
     internal const string Id = "dev.ayce.oc2bridge";
     private const string SupportedBuild = "22894075";
     private const string SupportedHash = "494157d1daff4f8144acd0a4fd64add092281992abbcb0cdf5f462f0c747b42b";
-    private const string SupportedScene = "s_sushi_1_1";
+    private const string SushiScene = "s_sushi_1_1";
+    private const string KevinScene = "s_city_h2";
     private static ManualLogSource log;
     private static Overlay overlay;
     private static bool applyOverlay;
+    private static string SceneNameToWatch => applyOverlay ? overlay.Scene : SushiScene;
     private static MethodInfo isSteamLoggedOn;
     private static MethodInfo syncPhysics;
     private static MethodInfo getMeshFilter;
@@ -31,12 +33,14 @@ public sealed class Plugin : BasePlugin
     private static Type rotationType;
     private static int? sceneHandle;
     private static int? refusedHandle;
-    private static readonly List<(object Owner, object Original)> RecipeChanges = new();
+    private static OrderRecipe[] allowedOrders = Array.Empty<OrderRecipe>();
+    private static int nextReplacement;
     private static Dictionary<int, WorktopHighlight> worktopHighlights = new();
     private static readonly HashSet<int> ReportedWorktops = new();
 
     private sealed record Placement(StationMove Move, object Transform, object Position, object Rotation, object BakedWorktop);
     private sealed record WorktopHighlight(object Renderer, string Source, string Destination);
+    private sealed record OrderRecipe(object Entry, string Name);
 
     public override void Load()
     {
@@ -71,6 +75,9 @@ public sealed class Plugin : BasePlugin
             {
                 var steam = Assembly.Load("Assembly-CSharp-firstpass").GetType("Steamworks.SteamUser", throwOnError: true);
                 isSteamLoggedOn = Find(steam, "BLoggedOn", Type.EmptyTypes);
+            }
+            if (applyOverlay && overlay.Moves.Length > 0)
+            {
                 var physics = Assembly.Load("UnityEngine.PhysicsModule").GetType("UnityEngine.Physics", throwOnError: true);
                 syncPhysics = Find(physics, "SyncTransforms", Type.EmptyTypes);
                 var gameObject = unity.GetType("UnityEngine.GameObject", throwOnError: true);
@@ -89,8 +96,21 @@ public sealed class Plugin : BasePlugin
                 Hook(harmony, Find(store, "OnFoodDelivered"), nameof(AfterDelivery), postfix: true);
                 if (applyOverlay)
                 {
-                    var highlighter = game.GetType("ClientAnticipateInteractionHighlight", throwOnError: true);
-                    Hook(harmony, Find(highlighter, "SaveRenderersStartingSettings", Type.EmptyTypes), nameof(BeforeSaveHighlightMaterials));
+                    if (overlay.Moves.Length > 0)
+                    {
+                        var highlighter = game.GetType("ClientAnticipateInteractionHighlight", throwOnError: true);
+                        Hook(harmony, Find(highlighter, "SaveRenderersStartingSettings", Type.EmptyTypes), nameof(BeforeSaveHighlightMaterials));
+                    }
+                    if (overlay.Recipes.Length > 0)
+                    {
+                        var scripted = game.GetType("ScriptedRoundData", throwOnError: true);
+                        var roundState = game.GetType("RoundInstanceDataBase", throwOnError: true);
+                        Hook(harmony, Find(round, "GetNextRecipe", new[] { roundState }), nameof(AfterRecipeSelection), postfix: true);
+                        Hook(harmony, Find(scripted, "GetNextRecipe", new[] { roundState }), nameof(AfterRecipeSelection), postfix: true);
+                        var server = game.GetType("ServerOrderControllerBase", throwOnError: true);
+                        var entry = game.GetType("RecipeList+Entry", throwOnError: true);
+                        Hook(harmony, Find(server, "AddNewOrder", new[] { entry }), nameof(TraceServerOrder));
+                    }
                 }
             }
             catch
@@ -98,7 +118,7 @@ public sealed class Plugin : BasePlugin
                 harmony.UnpatchSelf();
                 throw;
             }
-            log.LogInfo($"BRIDGE_READY mode={(applyOverlay ? "overlay" : "observe")} build={SupportedBuild} scene={SupportedScene}");
+            log.LogInfo($"BRIDGE_READY mode={(applyOverlay ? "overlay" : "observe")} build={SupportedBuild} scene={SceneNameToWatch}");
         }
         catch (Exception error)
         {
@@ -108,10 +128,11 @@ public sealed class Plugin : BasePlugin
 
     private static void Validate(Overlay value)
     {
-        if (value == null || value.Version != 1 || value.Build != SupportedBuild || value.Scene != SupportedScene ||
+        if (value == null || value.Version != 1 || value.Build != SupportedBuild || value.Scene is not (SushiScene or KevinScene) ||
             !SupportedHash.Equals(value.Hash, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("Overlay schema, target scene or game fingerprint is incompatible.");
-        if (string.IsNullOrWhiteSpace(value.Name) || value.Name.Length > 120 || value.Moves == null || value.Moves.Length is < 1 or > 26)
+        if (string.IsNullOrWhiteSpace(value.Name) || value.Name.Length > 120 || value.Moves == null || value.Moves.Length > 26 ||
+            (value.Scene == KevinScene && value.Moves.Length != 0))
             throw new InvalidDataException("Invalid overlay name or station count.");
         var paths = new HashSet<string>(StringComparer.Ordinal);
         foreach (var move in value.Moves)
@@ -122,7 +143,8 @@ public sealed class Plugin : BasePlugin
                 Math.Abs(move.Rotation.Sum(v => v * v) - 1f) > .005f)
                 throw new InvalidDataException($"Invalid move for {move?.Path}.");
         }
-        if (value.Recipes == null || value.Recipes.Length > 30 || value.Recipes.Any(s => string.IsNullOrWhiteSpace(s) || s.Length > 150) ||
+        if (value.Recipes == null || value.Recipes.Length > 30 || (value.Moves.Length == 0 && value.Recipes.Length == 0) ||
+            value.Recipes.Any(s => string.IsNullOrWhiteSpace(s) || s.Length > 150) ||
             value.Recipes.Distinct(StringComparer.Ordinal).Count() != value.Recipes.Length)
             throw new InvalidDataException("Invalid recipe allowlist.");
     }
@@ -159,15 +181,6 @@ public sealed class Plugin : BasePlugin
             : (AccessTools.Field(type, member) ?? throw new MissingMemberException(type.FullName, member)).GetValue(owner);
     }
 
-    private static void Put(object owner, string member, object value)
-    {
-        var type = owner.GetType();
-        if (AccessTools.Property(type, member) is PropertyInfo property)
-            property.SetValue(owner, value);
-        else
-            (AccessTools.Field(type, member) ?? throw new MissingMemberException(type.FullName, member)).SetValue(owner, value);
-    }
-
     private static object Call(object owner, string name) => Find(owner.GetType(), name, Type.EmptyTypes).Invoke(owner, null);
 
     private static object SceneOf(object component) => Get(Get(component, "gameObject"), "scene");
@@ -183,14 +196,14 @@ public sealed class Plugin : BasePlugin
         try
         {
             var scene = SceneOf(__instance);
-            if (SceneName(scene) != SupportedScene || refusedHandle == Handle(scene))
+            if (SceneName(scene) != SceneNameToWatch || refusedHandle == Handle(scene))
                 return;
             if (applyOverlay && (bool)isSteamLoggedOn.Invoke(null, null))
                 throw new InvalidOperationException("Switch Steam to Offline Mode before testing; no overlay has been applied.");
-            if (applyOverlay)
+            if (applyOverlay && overlay.Moves.Length > 0)
                 ApplyMoves(scene);
             sceneHandle = Handle(scene);
-            log.LogInfo($"BRIDGE_SCENE scene={SupportedScene} mode={(applyOverlay ? "overlay" : "observe")} moves={(applyOverlay ? overlay.Moves.Length : 0)}");
+            log.LogInfo($"BRIDGE_SCENE scene={SceneNameToWatch} mode={(applyOverlay ? "overlay" : "observe")} moves={(applyOverlay ? overlay.Moves.Length : 0)}");
         }
         catch (Exception error)
         {
@@ -323,25 +336,19 @@ public sealed class Plugin : BasePlugin
     {
         if (sceneHandle == null)
             return;
+        allowedOrders = Array.Empty<OrderRecipe>();
+        nextReplacement = 0;
         try
         {
             var recipeList = Get(__instance, "m_recipes");
             var entries = Get(recipeList, "m_recipes");
-            var candidates = ((IEnumerable)entries).Cast<object>().Select(entry => (Entry: entry, Name: (string)Get(Get(entry, "m_order"), "name"))).ToArray();
+            var candidates = ((IEnumerable)entries).Cast<object>().Select(entry => new OrderRecipe(entry, RecipeName(entry))).ToArray();
             log.LogInfo($"BRIDGE_RECIPES {string.Join(" | ", candidates.Select(x => x.Name))}");
             if (!applyOverlay || overlay.Recipes.Length == 0)
                 return;
-            var allowed = candidates.Where(x => overlay.Recipes.Contains(x.Name, StringComparer.Ordinal)).ToArray();
-            if (!overlay.Recipes.All(name => allowed.Any(row => row.Name == name)))
+            if (!overlay.Recipes.All(name => candidates.Any(row => row.Name == name)))
                 throw new InvalidDataException("Requested recipe is not in this round's original AYCE recipe pool.");
-            var type = entries.GetType();
-            var array = Activator.CreateInstance(type, new object[] { (long)allowed.Length });
-            var indexer = type.GetProperty("Item") ?? throw new MissingMemberException(type.FullName, "Item");
-            var indexType = indexer.GetIndexParameters().Single().ParameterType;
-            for (var i = 0; i < allowed.Length; i++)
-                indexer.SetValue(array, allowed[i].Entry, new[] { Convert.ChangeType(i, indexType) });
-            RecipeChanges.Add((recipeList, entries));
-            Put(recipeList, "m_recipes", array);
+            allowedOrders = overlay.Recipes.Select(name => candidates.First(row => row.Name == name)).ToArray();
             log.LogInfo($"BRIDGE_RECIPE_FILTER {string.Join(" | ", overlay.Recipes)}");
         }
         catch (Exception error)
@@ -350,10 +357,78 @@ public sealed class Plugin : BasePlugin
         }
     }
 
-    private static void AfterOrder()
+    private static string RecipeName(object entry) => (string)Get(Get(entry, "m_order"), "name");
+
+    private static void AfterRecipeSelection(object __result)
     {
-        if (sceneHandle != null)
-            log.LogInfo("BRIDGE_ORDER_CREATED");
+        if (sceneHandle == null || allowedOrders.Length == 0 || __result == null)
+            return;
+        try
+        {
+            // Both selectors return a new native array. Editing its entries avoids rewriting native call arguments.
+            var count = Convert.ToInt32(Get(__result, "Length"));
+            var indexer = FindIndexer(__result);
+            var indexType = indexer.GetIndexParameters().Single().ParameterType;
+            for (var i = 0; i < count; i++)
+            {
+                var index = new[] { Convert.ChangeType(i, indexType) };
+                var requested = RecipeName(indexer.GetValue(__result, index));
+                if (allowedOrders.Any(recipe => recipe.Name == requested))
+                    continue;
+                var replacement = allowedOrders[nextReplacement];
+                indexer.SetValue(__result, replacement.Entry, index);
+                var selected = RecipeName(indexer.GetValue(__result, index));
+                if (selected != replacement.Name)
+                    throw new InvalidOperationException("The native selection array did not keep the replacement.");
+                nextReplacement = (nextReplacement + 1) % allowedOrders.Length;
+                log.LogInfo($"BRIDGE_RECIPE_SELECTED requested={requested} selected={selected}");
+            }
+        }
+        catch (Exception error)
+        {
+            log.LogWarning($"BRIDGE_RECIPE_SELECTION_SKIPPED {error}");
+        }
+    }
+
+    private static PropertyInfo FindIndexer(object collection) => collection.GetType().GetProperty("Item")
+        ?? throw new MissingMemberException(collection.GetType().FullName, "Item");
+
+    private static void TraceServerOrder(object __0)
+    {
+        if (sceneHandle == null || allowedOrders.Length == 0)
+            return;
+        try
+        {
+            var name = RecipeName(__0);
+            log.LogInfo($"BRIDGE_SERVER_ORDER recipe={name} allowed={allowedOrders.Any(recipe => recipe.Name == name)}");
+        }
+        catch (Exception error)
+        {
+            log.LogWarning($"BRIDGE_SERVER_ORDER_TRACE_SKIPPED {error.Message}");
+        }
+    }
+
+    private static void AfterOrder(object __instance)
+    {
+        if (sceneHandle == null)
+            return;
+        log.LogInfo("BRIDGE_ORDER_CREATED");
+        if (allowedOrders.Length == 0)
+            return;
+        try
+        {
+            var active = Get(__instance, "m_activeOrders");
+            var count = (int)Get(active, "Count");
+            if (count == 0)
+                return;
+            var last = FindIndexer(active).GetValue(active, new object[] { count - 1 });
+            var name = RecipeName(Get(last, "RecipeListEntry"));
+            log.LogInfo($"BRIDGE_CLIENT_ORDER recipe={name} allowed={allowedOrders.Any(recipe => recipe.Name == name)}");
+        }
+        catch (Exception error)
+        {
+            log.LogWarning($"BRIDGE_CLIENT_ORDER_TRACE_SKIPPED {error.Message}");
+        }
     }
 
     private static void AfterDelivery(bool __0)
@@ -371,13 +446,8 @@ public sealed class Plugin : BasePlugin
                 refusedHandle = null;
             if (sceneHandle != handle)
                 return;
-            for (var index = RecipeChanges.Count - 1; index >= 0; index--)
-            {
-                var state = RecipeChanges[index];
-                try { Put(state.Owner, "m_recipes", state.Original); }
-                catch (Exception error) { log.LogError($"BRIDGE_RECIPE_RESTORE_ERROR {error}"); }
-            }
-            RecipeChanges.Clear();
+            allowedOrders = Array.Empty<OrderRecipe>();
+            nextReplacement = 0;
             worktopHighlights.Clear();
             ReportedWorktops.Clear();
             sceneHandle = null;

@@ -1,6 +1,6 @@
 # AYCE OC2 Bridge
 
-第一阶段开发版支持读取 OC2DIYLevel 发布包，并把已选静态工作台的位置转换成 AYCE 关卡覆盖配置。首测目标为 Windows x64 Steam AYCE Build `22894075` 的 OC2 剧情 `1-1`（`s_sushi_1_1`）。导入结果可在这个模板关卡中试跑。这个版本保留 AYCE 的地面、出生点、关卡设置与计分。它可以筛选 AYCE 模板本来就支持的菜谱，并在报告中保留社区包的自制菜谱定义供后续适配。
+第一阶段开发版支持读取 OC2DIYLevel 发布包，并转换已支持的关卡与菜谱数据。Windows x64 Steam AYCE Build `22894075` 上，OC2 剧情 `1-1`（`s_sushi_1_1`）支持静态台面移位和菜谱覆盖，剧情凯文 2（`s_city_h2`）支持菜谱覆盖。覆盖沿用 AYCE 的地面、出生点、关卡设置和计分。社区包中新菜谱的元数据可先导出到兼容报告。
 
 应用覆盖要求 Steam 离线模式。测试时使用空存档或专用存档，因为进入的是游戏自带关卡，结算可能记录该存档的原版关卡进度。观察模式记录日志，适合先确认加载器、场景与游戏订单回调。
 
@@ -38,6 +38,14 @@ Select-String -LiteralPath "$game\BepInEx\LogOutput.log" -Pattern 'BRIDGE_' -Con
 
 当前 DLL 已编译完成。上述期望日志和游戏内行为需要实机测试确认。插件和导入都在本地运行。
 
+### DTsimple 第 4 关原菜单
+
+`release/dtsimple-4-kevin2-recipes.json` 使用官方 OC2DIYLevel 依赖，从 `DTsimple 7.1` 第 4 关原包解析并转换三道菜谱。安装后以 Steam 离线模式，在测试档进入 OC2 剧情的 **凯文 2**。订单应为胡萝卜、肉或虾蒸点心。普通蒸鱼应从菜单中筛除。做并交付任意一道点心来确认计分。
+
+```powershell
+.\scripts\Install-Bridge.ps1 -GamePath $game -Mode Custom -Overlay '.\release\dtsimple-4-kevin2-recipes.json'
+```
+
 ## 检查和转换自己的社区包
 
 需要 Python 3.11 或更新版本。`inspect` 读取 ZIP 或已解压目录，列出每关的工作台路径、世界坐标、菜谱引用、每人数参数和识别到的机关。可以用一个或多个 `--dependency` 加入同版本的社区资源包。指向可执行文件的输入只会出现在忽略清单，导入器处理 Unity 数据文件。
@@ -55,7 +63,14 @@ New-Item -ItemType Directory -Path local -Force | Out-Null
 
 使用静态合批模型的桌台需要移到另一座参与重排的同类台面原位。插件据此匹配目标格的台面渲染器，让交互高亮跟随站点，同时利用模板已烘焙的桌台外观。
 
-可选 `recipeMap` 用已经解析出的源菜谱名映射到游戏日志 `BRIDGE_RECIPES` 中的 AYCE 精确名称。筛选只在这个模板已有的原版订单池内生效，合并食材、自制图标和加工逻辑仍需实现。导入不会默默替换任何不可解析的菜谱。带移动平台、独立碰撞或其它脚本的内容在兼容报告中供人工评估。每人数计时和星级阈值当前仅导出到兼容报告。
+可选 `recipeMap` 用已经解析出的源菜谱名映射到游戏日志 `BRIDGE_RECIPES` 中的 AYCE 精确名称。插件在预设和随机选择结束后筛选结果，替换项从该模板已有的菜谱池取得。`BRIDGE_RECIPE_SELECTED` 记录替换结果，`BRIDGE_SERVER_ORDER` 和 `BRIDGE_CLIENT_ORDER` 分别记录服务端入队和客户端显示的菜谱。合并食材、自制图标和加工逻辑仍需实现。导入不会默默替换任何不可解析的菜谱。带移动平台、独立碰撞或其它脚本的内容在兼容报告中供人工评估。每人数计时和星级阈值当前仅导出到兼容报告。
+
+设 `matchRecipes` 为 `true` 时，转换器使用来源菜谱的资源路径在所选 AYCE 模板中匹配等价菜谱。`examples/dtsimple-4-steamed-recipes.json` 只转换菜单，因此映射文件可以省去 `stationMap`。用 `--dependency` 指定 OC2DIYLevel 官方 ZIP，转换器只解析其中的 Unity 数据。
+
+```powershell
+.\.venv\Scripts\python.exe -m bridge target $game s_city_h2 --out local\kevin2.json
+.\.venv\Scripts\python.exe -m bridge convert 'C:\maps\DTsimple_v7.1.zip' --dependency 'C:\maps\OC2DIYLevel-v0.11.1.zip' --profile local\kevin2.json --mapping examples\dtsimple-4-steamed-recipes.json --out local\steamed.json --report local\steamed-report.json --allow-partial
+```
 
 ## 构建
 
@@ -63,6 +78,7 @@ New-Item -ItemType Directory -Path local -Force | Out-Null
 
 ```powershell
 .\scripts\Build-Bridge.ps1 -BepInExCore 'C:\dependencies\BepInEx\core'
+.\tests\Test-OrderFilter.ps1 -BepInExCore 'C:\dependencies\BepInEx\core'
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 

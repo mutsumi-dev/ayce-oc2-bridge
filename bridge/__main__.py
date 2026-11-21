@@ -10,6 +10,20 @@ from zipfile import BadZipFile
 from .assets import Bundles, ImportErrorDetail, load_bundles, scene_data, xyz
 
 
+TEMPLATE_RECIPE_ASSETS = {
+    's_sushi_1_1': {
+        'assets/data/orderdefinitions/recipeitems/sushi/sushi_plainfish.asset': 'Sushi_PlainFish',
+        'assets/data/orderdefinitions/recipeitems/sushi/sushi_plainprawn.asset': 'Sushi_PlainPrawn',
+    },
+    's_city_h2': {
+        'assets/data/orderdefinitions/recipeitems/steamedspecials/steamedspecial_carrot.asset': 'SteamedSpecial_Carrot',
+        'assets/data/orderdefinitions/recipeitems/steamedspecials/steamedspecial_fish.asset': 'SteamedSpecial_Fish',
+        'assets/data/orderdefinitions/recipeitems/steamedspecials/steamedspecial_meat.asset': 'SteamedSpecial_Meat',
+        'assets/data/orderdefinitions/recipeitems/steamedspecials/steamedspecial_prawns.asset': 'SteamedSpecial_Prawns',
+    },
+}
+
+
 def write_json(path, data):
     Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2, allow_nan=False) + '\n', encoding='utf-8')
 
@@ -101,7 +115,8 @@ def target(game, scene):
     data = scene_data(Bundles(sources), bundle.name)
     if not data['stations']:
         raise ImportErrorDetail('No supported station transforms in target scene')
-    return {'format': 'ayce-target/1', 'scene': scene.lower(), 'build': match[1], 'gameSha256': fingerprint(live), **data}
+    return {'format': 'ayce-target/1', 'scene': scene.lower(), 'build': match[1], 'gameSha256': fingerprint(live),
+            'recipeAssets': TEMPLATE_RECIPE_ASSETS.get(scene.lower(), {}), **data}
 
 
 def by_path(items, path):
@@ -116,8 +131,11 @@ def by_path(items, path):
 
 
 def package(profile, name, moves, recipes=(), provenance=None):
-    if profile.get('scene') != 's_sushi_1_1' or len(moves) not in range(1, 27):
-        raise ImportErrorDetail('0.1.0 packages support up to 26 moves on the s_sushi_1_1 template')
+    scene = profile.get('scene')
+    if scene not in TEMPLATE_RECIPE_ASSETS or len(moves) > 26 or (not moves and not recipes):
+        raise ImportErrorDetail('Overlay must use a supported AYCE template and include moves or recipes')
+    if scene == 's_city_h2' and moves:
+        raise ImportErrorDetail('Kevin 2 currently supports recipe overlays only')
     counts = Counter(m['path'] for m in moves)
     if any(count > 1 for count in counts.values()):
         raise ImportErrorDetail('A target station can only be moved once')
@@ -153,6 +171,28 @@ def make_demo(profile):
     return package(profile, 'AYCE bridge smoke test', [move(a, b['position'], b['rotation']), move(b, a['position'], a['rotation'])])
 
 
+def map_recipes(level, profile, mapping):
+    explicit = mapping.get('recipeMap', {})
+    use_asset_matches = mapping.get('matchRecipes', False)
+    if not isinstance(explicit, dict) or not isinstance(use_asset_matches, bool):
+        raise ImportErrorDetail('recipeMap must be an object and matchRecipes must be a boolean')
+    known = {r['name'] for r in level['recipes'] if r.get('name') and 'definition' not in r}
+    if any(name not in known or not isinstance(target_name, str) or not target_name for name, target_name in explicit.items()):
+        raise ImportErrorDetail('Recipe mapping requires a resolved non-custom source recipe and an exact AYCE recipe name')
+    if not use_asset_matches:
+        return explicit
+
+    target_assets = TEMPLATE_RECIPE_ASSETS.get(profile.get('scene'), {})
+    automatically_matched = {}
+    for recipe in level['recipes']:
+        asset = recipe.get('assetPath', '').replace('\\', '/').casefold()
+        if recipe.get('name') in known and asset in target_assets:
+            automatically_matched[recipe['name']] = target_assets[asset]
+    if not automatically_matched:
+        raise ImportErrorDetail('No source recipe asset matches this AYCE template. Supply the source dependencies or choose a compatible template.')
+    return {**automatically_matched, **explicit}
+
+
 def convert(source_path, dependencies, mapping, profile, allow_partial):
     if profile.get('format') != 'ayce-target/1' or profile.get('scene') != mapping.get('targetScene'):
         raise ImportErrorDetail('Mapping target scene and target profile differ')
@@ -177,12 +217,9 @@ def convert(source_path, dependencies, mapping, profile, allow_partial):
         old = by_path(profile['stations'], row['target'])
         destination = by_path(profile['stations'], row['toOriginalPositionOf'])
         moves.append(move(old, destination['position'], destination['rotation']))
-    if not applied:
-        raise ImportErrorDetail('Map at least one community station to a template station')
-    recipes = mapping.get('recipeMap', {})
-    known = {r['name'] for r in level['recipes'] if r.get('name') and 'definition' not in r}
-    if any(name not in known or not isinstance(target_name, str) or not target_name for name, target_name in recipes.items()):
-        raise ImportErrorDetail('Recipe mapping requires a resolved non-custom source recipe and an exact AYCE recipe name')
+    recipes = map_recipes(level, profile, mapping)
+    if not applied and (moves or not recipes):
+        raise ImportErrorDetail('Map at least one community station or export a menu without station moves')
     unported = {'stations': [s['path'] for s in level['stations'] if s['active'] and s['path'] not in applied],
                 'recipes': [r for r in level['recipes'] if r.get('name') not in recipes], 'mechanics': level['mechanics'],
                 'playerSettings': level['players'], 'levelGeometry': 'AYCE template geometry retained'}

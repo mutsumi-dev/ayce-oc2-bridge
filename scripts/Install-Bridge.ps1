@@ -32,7 +32,7 @@ if ($Mode -eq 'Custom' -and -not $Overlay) { throw 'Specify -Overlay with the co
 $data = $null
 if ($Mode -ne 'Observe') {
     $data = Get-Content -Raw -LiteralPath $Overlay | ConvertFrom-Json
-    if ($data.schemaVersion -ne 1 -or $data.targetBuild -ne '22894075' -or $data.targetScene -cne 's_sushi_1_1' -or $data.targetGameSha256 -ne $actualHash) {
+    if ($data.schemaVersion -ne 1 -or $data.targetBuild -ne '22894075' -or $data.targetScene -cnotin @('s_sushi_1_1', 's_city_h2') -or $data.targetGameSha256 -ne $actualHash) {
         throw 'The overlay target does not match this build and scene.'
     }
 }

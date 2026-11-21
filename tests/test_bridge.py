@@ -5,7 +5,7 @@ import unittest
 from zipfile import ZipFile
 
 from bridge.assets import ImportErrorDetail, load_bundles, member_name, rotate
-from bridge.__main__ import by_path, make_demo, move, package
+from bridge.__main__ import by_path, make_demo, map_recipes, move, package
 
 
 CHOP = 'Design/Gameplay Stations/ChoppingBoard_Side 5 (1)'
@@ -57,3 +57,22 @@ class OverlayTests(unittest.TestCase):
     def test_refuses_ambiguous_station(self):
         with self.assertRaisesRegex(ImportErrorDetail, 'ambiguous'):
             by_path([self.a, self.a], CHOP)
+
+    def test_kevin_recipe_overlay_accepts_zero_moves(self):
+        self.profile['scene'] = 's_city_h2'
+        manifest = package(self.profile, 'Steamed', [], ['SteamedSpecial_Meat'])
+        self.assertEqual(manifest['recipeAllowlist'], ['SteamedSpecial_Meat'])
+        with self.assertRaisesRegex(ImportErrorDetail, 'recipe overlays only'):
+            package(self.profile, 'Invalid', [move(self.a, self.b['position'], self.b['rotation'])])
+
+    def test_recipe_assets_match_without_renaming_unrelated_entries(self):
+        self.profile['scene'] = 's_city_h2'
+        steamed = {'name': 'Steamed_Meat_SO', 'assetPath': r'Assets\Data\OrderDefinitions\RecipeItems\SteamedSpecials\SteamedSpecial_Meat.asset'}
+        custom = {**steamed, 'name': 'Custom_Dumpling', 'definition': {'score': 44}}
+        missing = {'ref': 'cab-reference:123'}
+        result = map_recipes({'recipes': [steamed, custom, missing]}, self.profile, {'matchRecipes': True})
+        self.assertEqual(result, {'Steamed_Meat_SO': 'SteamedSpecial_Meat'})
+        self.assertEqual(map_recipes({'recipes': [steamed]}, self.profile, {}), {})
+        self.profile['scene'] = 's_sushi_1_1'
+        with self.assertRaisesRegex(ImportErrorDetail, 'No source recipe asset matches'):
+            map_recipes({'recipes': [steamed]}, self.profile, {'matchRecipes': True})
