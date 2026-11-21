@@ -1,0 +1,25 @@
+{
+  "sourceScene": "s_dtsimple_4",
+  "targetScene": "s_sushi_1_1",
+  "offset": [1.2, 0, -1.2],
+  "stationMap": [
+    {
+      "source": "Design/Counters/ChoppingCounter",
+      "target": "Design/Gameplay Stations/ChoppingBoard_Side 5 (3)"
+    },
+    {
+      "source": "Design/Counters/ChoppingCounter (2)",
+      "target": "Design/Gameplay Stations/ChoppingBoard_Side 5 (1)"
+    }
+  ],
+  "vacate": [
+    {
+      "target": "Design/Work Surfaces/countertop_01_standard_edge (11)",
+      "toOriginalPositionOf": "Design/Gameplay Stations/ChoppingBoard_Side 5 (3)"
+    },
+    {
+      "target": "Design/Work Surfaces/countertop_01_standard_edge (23)",
+      "toOriginalPositionOf": "Design/Gameplay Stations/ChoppingBoard_Side 5 (1)"
+    }
+  ]
+}
