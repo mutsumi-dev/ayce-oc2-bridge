@@ -13,7 +13,7 @@ using HarmonyLib;
 
 namespace AyceOc2Bridge;
 
-[BepInPlugin(Id, "AYCE OC2 Bridge", "0.1.0")]
+[BepInPlugin(Id, "AYCE OC2 Bridge", "0.1.1")]
 public sealed class Plugin : BasePlugin
 {
     internal const string Id = "dev.ayce.oc2bridge";
@@ -25,11 +25,18 @@ public sealed class Plugin : BasePlugin
     private static bool applyOverlay;
     private static MethodInfo isSteamLoggedOn;
     private static MethodInfo syncPhysics;
+    private static MethodInfo getMeshFilter;
+    private static MethodInfo getMeshRenderer;
     private static Type vectorType;
     private static Type rotationType;
     private static int? sceneHandle;
     private static int? refusedHandle;
     private static readonly List<(object Owner, object Original)> RecipeChanges = new();
+    private static Dictionary<int, WorktopHighlight> worktopHighlights = new();
+    private static readonly HashSet<int> ReportedWorktops = new();
+
+    private sealed record Placement(StationMove Move, object Transform, object Position, object Rotation, object BakedWorktop);
+    private sealed record WorktopHighlight(object Renderer, string Source, string Destination);
 
     public override void Load()
     {
@@ -66,6 +73,10 @@ public sealed class Plugin : BasePlugin
                 isSteamLoggedOn = Find(steam, "BLoggedOn", Type.EmptyTypes);
                 var physics = Assembly.Load("UnityEngine.PhysicsModule").GetType("UnityEngine.Physics", throwOnError: true);
                 syncPhysics = Find(physics, "SyncTransforms", Type.EmptyTypes);
+                var gameObject = unity.GetType("UnityEngine.GameObject", throwOnError: true);
+                var getComponent = gameObject.GetMethods().Single(m => m.Name == "GetComponent" && m.IsGenericMethodDefinition && m.GetParameters().Length == 0);
+                getMeshFilter = getComponent.MakeGenericMethod(unity.GetType("UnityEngine.MeshFilter", throwOnError: true));
+                getMeshRenderer = getComponent.MakeGenericMethod(unity.GetType("UnityEngine.MeshRenderer", throwOnError: true));
             }
 
             var harmony = new Harmony(Id);
@@ -76,6 +87,11 @@ public sealed class Plugin : BasePlugin
                 Hook(harmony, Find(round, "InitialiseRound", Type.EmptyTypes), nameof(BeforeRound));
                 Hook(harmony, Find(store, "AddNewOrder"), nameof(AfterOrder), postfix: true);
                 Hook(harmony, Find(store, "OnFoodDelivered"), nameof(AfterDelivery), postfix: true);
+                if (applyOverlay)
+                {
+                    var highlighter = game.GetType("ClientAnticipateInteractionHighlight", throwOnError: true);
+                    Hook(harmony, Find(highlighter, "SaveRenderersStartingSettings", Type.EmptyTypes), nameof(BeforeSaveHighlightMaterials));
+                }
             }
             catch
             {
@@ -187,7 +203,7 @@ public sealed class Plugin : BasePlugin
     {
         var roots = (IEnumerable)Call(scene, "GetRootGameObjects");
         var rootGroups = roots.Cast<object>().ToLookup(o => (string)Get(o, "name"), StringComparer.Ordinal);
-        var plans = new List<(StationMove Move, object Transform, object Position, object Rotation)>();
+        var plans = new List<Placement>();
         foreach (var move in overlay.Moves)
         {
             var parts = move.Path.Split('/');
@@ -203,8 +219,10 @@ public sealed class Plugin : BasePlugin
                 throw new InvalidDataException($"Scene object origin changed: {move.Path} ({string.Join(", ", actual)})");
             if (plans.Any(p => DistanceSquared(p.Move.Position, move.Position) < .25f))
                 throw new InvalidDataException($"Station destination overlaps another move: {move.Path}");
-            plans.Add((move, transform, position, rotation));
+            plans.Add(new Placement(move, transform, position, rotation, FindBakedWorktop(transform)));
         }
+
+        var remaps = BuildHighlightBindings(plans);
 
         var attempted = 0;
         try
@@ -229,8 +247,73 @@ public sealed class Plugin : BasePlugin
             try { syncPhysics.Invoke(null, null); } catch { }
             throw;
         }
+        worktopHighlights = remaps;
         foreach (var plan in plans)
             log.LogInfo($"BRIDGE_MOVE {plan.Move.Path} -> {string.Join(", ", plan.Move.Position)}");
+    }
+
+    private static object FindBakedWorktop(object transform)
+    {
+        var find = Find(transform.GetType(), "Find", new[] { typeof(string) });
+        var meshTransform = find.Invoke(transform, new object[] { "Worktop/Mesh" });
+        if (meshTransform == null)
+            return null;
+        var gameObject = Get(meshTransform, "gameObject");
+        var filter = getMeshFilter.Invoke(gameObject, null);
+        var mesh = filter == null ? null : Get(filter, "sharedMesh");
+        if (mesh == null || !((string)Get(mesh, "name")).StartsWith("Combined Mesh", StringComparison.Ordinal))
+            return null;
+        return getMeshRenderer.Invoke(gameObject, null)
+            ?? throw new InvalidDataException("A baked worktop is missing its mesh renderer.");
+    }
+
+    private static Dictionary<int, WorktopHighlight> BuildHighlightBindings(IReadOnlyList<Placement> plans)
+    {
+        var bindings = new Dictionary<int, WorktopHighlight>();
+        foreach (var source in plans)
+        {
+            if (source.BakedWorktop == null || DistanceSquared(source.Move.Original, source.Move.Position) < .0025f)
+                continue;
+            // Unity draws these batched submeshes in their original world positions.
+            var destination = plans.SingleOrDefault(p => DistanceSquared(p.Move.Original, source.Move.Position) < .0025f);
+            if (destination?.BakedWorktop == null)
+                throw new InvalidDataException($"Baked worktop requires another moved worktop at the destination: {source.Move.Path}");
+            var rendererId = (int)Call(source.BakedWorktop, "GetInstanceID");
+            bindings.Add(rendererId, new WorktopHighlight(destination.BakedWorktop, source.Move.Path, destination.Move.Path));
+        }
+        return bindings;
+    }
+
+    private static void BeforeSaveHighlightMaterials(object __instance)
+    {
+        if (sceneHandle == null || worktopHighlights.Count == 0)
+            return;
+
+        try
+        {
+            // The game has just rebuilt this list and will cache the materials from it next.
+            var list = Get(__instance, "m_renderers");
+            var count = (int)Get(list, "Count");
+            var indexer = list.GetType().GetProperty("Item")
+                ?? throw new MissingMemberException(list.GetType().FullName, "Item");
+            for (var i = 0; i < count; i++)
+            {
+                var index = new object[] { i };
+                var renderer = indexer.GetValue(list, index);
+                if (renderer == null)
+                    continue;
+                var id = (int)Call(renderer, "GetInstanceID");
+                if (!worktopHighlights.TryGetValue(id, out var binding))
+                    continue;
+                indexer.SetValue(list, binding.Renderer, index);
+                if (ReportedWorktops.Add(id))
+                    log.LogInfo($"BRIDGE_HIGHLIGHT_REMAP {binding.Source} -> {binding.Destination}");
+            }
+        }
+        catch (Exception error)
+        {
+            log.LogWarning($"BRIDGE_HIGHLIGHT_SKIPPED {error}");
+        }
     }
 
     private static void SetTransform(object transform, object position, object rotation) =>
@@ -295,6 +378,8 @@ public sealed class Plugin : BasePlugin
                 catch (Exception error) { log.LogError($"BRIDGE_RECIPE_RESTORE_ERROR {error}"); }
             }
             RecipeChanges.Clear();
+            worktopHighlights.Clear();
+            ReportedWorktops.Clear();
             sceneHandle = null;
             log.LogInfo("BRIDGE_SCENE_EXIT");
         }
