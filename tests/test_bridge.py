@@ -5,7 +5,7 @@ import unittest
 from zipfile import ZipFile
 
 from bridge.assets import ImportErrorDetail, load_bundles, member_name, rotate
-from bridge.__main__ import by_path, make_demo, map_recipes, move, package
+from bridge.__main__ import by_path, campaign_rules, make_demo, map_recipes, move, package
 
 
 CHOP = 'Design/Gameplay Stations/ChoppingBoard_Side 5 (1)'
@@ -76,3 +76,22 @@ class OverlayTests(unittest.TestCase):
         self.profile['scene'] = 's_sushi_1_1'
         with self.assertRaisesRegex(ImportErrorDetail, 'No source recipe asset matches'):
             map_recipes({'recipes': [steamed]}, self.profile, {'matchRecipes': True})
+
+
+class CampaignRulesTests(unittest.TestCase):
+    def setUp(self):
+        self.solo = {'roundTime': 270, 'orderLifeTime': 180, 'timeBetweenOrders': 15,
+                     'm_OneStarScore': 100, 'm_TwoStarScore': 200, 'm_ThreeStarScore': 300, 'm_FourStarScore': 1600}
+
+    def test_exports_distinct_rules_by_player_count(self):
+        group = {**self.solo, 'orderLifeTime': 135, 'timeBetweenOrders': 10, 'm_FourStarScore': 2400}
+        rules = campaign_rules({'players': {'1': self.solo, '2': group}})
+        self.assertEqual(rules['1'], {'roundSeconds': 270, 'orderSeconds': 180, 'intervalSeconds': 15,
+                                      'starPoints': [100, 200, 300, 1600]})
+        self.assertEqual(rules['2']['starPoints'][-1], 2400)
+        self.assertEqual(rules['2']['intervalSeconds'], 10)
+
+    def test_rejects_bad_timing_or_unordered_star_thresholds(self):
+        for field, value in [('roundTime', 0), ('orderLifeTime', True), ('m_ThreeStarScore', 50)]:
+            with self.subTest(field=field), self.assertRaises(ImportErrorDetail):
+                campaign_rules({'players': {'1': {**self.solo, field: value}}})

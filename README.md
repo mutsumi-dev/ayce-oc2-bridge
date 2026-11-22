@@ -1,6 +1,6 @@
 # AYCE OC2 Bridge
 
-第一阶段开发版支持读取 OC2DIYLevel 发布包，并转换已支持的关卡与菜谱数据。Windows x64 Steam AYCE Build `22894075` 上，OC2 剧情 `1-1`（`s_sushi_1_1`）支持静态台面移位和菜谱覆盖，剧情凯文 2（`s_city_h2`）支持菜谱覆盖。覆盖沿用 AYCE 的地面、出生点、关卡设置和计分。社区包中新菜谱的元数据可先导出到兼容报告。
+第一阶段开发版支持读取 OC2DIYLevel 发布包，并转换已支持的关卡与菜谱数据。Windows x64 Steam AYCE Build `22894075` 上，OC2 剧情 `1-1`（`s_sushi_1_1`）支持静态台面移位和菜谱覆盖。`DTsimple 7.1` 第 4 关可以生成独立 F8 入口的布局预览，以剧情凯文 2 的原生厨具实现源碰撞、摆放和出生点。社区包中新菜谱的元数据可先导出到兼容报告。
 
 应用覆盖要求 Steam 离线模式。测试时使用空存档或专用存档，因为进入的是游戏自带关卡，结算可能记录该存档的原版关卡进度。观察模式记录日志，适合先确认加载器、场景与游戏订单回调。
 
@@ -46,6 +46,26 @@ Select-String -LiteralPath "$game\BepInEx\LogOutput.log" -Pattern 'BRIDGE_' -Con
 .\scripts\Install-Bridge.ps1 -GamePath $game -Mode Custom -Overlay '.\release\dtsimple-4-kevin2-recipes.json'
 ```
 
+### DTsimple 自定义入口测试
+
+在支持的 Steam 版本上启用下列覆盖。以 Steam 离线模式启动游戏，用已解锁凯文 2 的存档进入 OC2 故事地图并按 **F8**。入口暂用凯文 2 厨房测试源菜单和规则。开局目标时限为 **4:30**，单人开局及结算的四档阈值为 **100、200、300、1600**。交付蒸点心并等到结算，回到地图时比对凯文 2 的原有阈值、星数和最高分。
+
+```powershell
+.\scripts\Install-Bridge.ps1 -GamePath $game -Mode Custom -Overlay '.\release\dtsimple-4-custom-entry.json'
+```
+
+核对日志中的 `BRIDGE_CUSTOM_LAUNCH`、服务端和客户端的 `BRIDGE_CUSTOM_TIMER`、`BRIDGE_CUSTOM_RESULT`、`BRIDGE_CUSTOM_STAR_THRESHOLD` 和 `BRIDGE_CUSTOM_PROGRESS_BLOCKED`。若按键无响应，从 `BRIDGE_READY` 起检查 `BRIDGE_DISABLED`、`BRIDGE_CUSTOM_INPUT_UNAVAILABLE` 和 `BRIDGE_CUSTOM_LAUNCH_REJECTED`。
+
+### DTsimple 第 4 关布局预览
+
+用下列覆盖，在 Steam 离线模式下以已解锁凯文 2 的存档进入故事地图并按 **F8**。此预览复用 AYCE 厨具，按源关卡重建地面、墙体、49 个摆放点和 4 个厨师出生点。喷火机关和原场景美术暂未迁移，地面与墙边显示为简易几何体。
+
+```powershell
+.\scripts\Install-Bridge.ps1 -GamePath $game -Mode Custom -Overlay '.\release\dtsimple-4-layout.json'
+```
+
+先检查四个食材箱和三台搅拌机。用第三台搅拌机完成一次混合，将点心蒸熟、装盘、交付并等到结算。布局安装会留下 `BRIDGE_KITCHEN_APPLIED`。若场景仍是原版凯文 2，离开关卡并检查 `BRIDGE_KITCHEN_REJECTED` 或 `BRIDGE_SCENE_REJECTED` 附近的日志。用 `examples/dtsimple-4-layout.json` 重新转换时，`target --layout` 需用 `--dependency` 提供本机 AYCE 的 `duplicateassetisolation_assets_all.bundle`、`duplicateassetisolation_assets_all1.bundle`、`duplicateassetisolation_assets_all2.bundle` 和 `duplicateassetisolation_assets_all4.bundle`。
+
 ## 检查和转换自己的社区包
 
 需要 Python 3.11 或更新版本。`inspect` 读取 ZIP 或已解压目录，列出每关的工作台路径、世界坐标、菜谱引用、每人数参数和识别到的机关。可以用一个或多个 `--dependency` 加入同版本的社区资源包。指向可执行文件的输入只会出现在忽略清单，导入器处理 Unity 数据文件。
@@ -63,7 +83,7 @@ New-Item -ItemType Directory -Path local -Force | Out-Null
 
 使用静态合批模型的桌台需要移到另一座参与重排的同类台面原位。插件据此匹配目标格的台面渲染器，让交互高亮跟随站点，同时利用模板已烘焙的桌台外观。
 
-可选 `recipeMap` 用已经解析出的源菜谱名映射到游戏日志 `BRIDGE_RECIPES` 中的 AYCE 精确名称。插件在预设和随机选择结束后筛选结果，替换项从该模板已有的菜谱池取得。`BRIDGE_RECIPE_SELECTED` 记录替换结果，`BRIDGE_SERVER_ORDER` 和 `BRIDGE_CLIENT_ORDER` 分别记录服务端入队和客户端显示的菜谱。合并食材、自制图标和加工逻辑仍需实现。导入不会默默替换任何不可解析的菜谱。带移动平台、独立碰撞或其它脚本的内容在兼容报告中供人工评估。每人数计时和星级阈值当前仅导出到兼容报告。
+可选 `recipeMap` 用已经解析出的源菜谱名映射到游戏日志 `BRIDGE_RECIPES` 中的 AYCE 精确名称。插件在预设和随机选择结束后筛选结果，替换项从该模板已有的菜谱池取得。`BRIDGE_RECIPE_SELECTED` 记录替换结果，`BRIDGE_SERVER_ORDER` 和 `BRIDGE_CLIENT_ORDER` 分别记录服务端入队和客户端显示的菜谱。合并食材、自制图标和加工逻辑仍需实现。带移动平台、独立碰撞或其它脚本的内容在兼容报告中供人工评估。`examples/dtsimple-4-custom-entry.json` 的 `customEntry` 开关额外导出各人数的时限、出单间隔、订单保留时间和星级阈值。
 
 设 `matchRecipes` 为 `true` 时，转换器使用来源菜谱的资源路径在所选 AYCE 模板中匹配等价菜谱。`examples/dtsimple-4-steamed-recipes.json` 只转换菜单，因此映射文件可以省去 `stationMap`。用 `--dependency` 指定 OC2DIYLevel 官方 ZIP，转换器只解析其中的 Unity 数据。
 
@@ -71,6 +91,8 @@ New-Item -ItemType Directory -Path local -Force | Out-Null
 .\.venv\Scripts\python.exe -m bridge target $game s_city_h2 --out local\kevin2.json
 .\.venv\Scripts\python.exe -m bridge convert 'C:\maps\DTsimple_v7.1.zip' --dependency 'C:\maps\OC2DIYLevel-v0.11.1.zip' --profile local\kevin2.json --mapping examples\dtsimple-4-steamed-recipes.json --out local\steamed.json --report local\steamed-report.json --allow-partial
 ```
+
+在 `inspect` 上使用 `--layout` 可导出源场景的预制件摆放和地面、墙体碰撞盒。在 `target` 上使用相同选项可列出 AYCE 场景中的原生厨具和它们的组件、坐标及动态父级。`target --dependency` 可读取额外的本地 AYCE 资源包，解析食材箱等对象的外部引用。上述布局预览使用这两份清单生成适用于当前模板的覆盖。
 
 ## 构建
 

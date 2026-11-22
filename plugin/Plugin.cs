@@ -13,8 +13,8 @@ using HarmonyLib;
 
 namespace AyceOc2Bridge;
 
-[BepInPlugin(Id, "AYCE OC2 Bridge", "0.2.0")]
-public sealed class Plugin : BasePlugin
+[BepInPlugin(Id, "AYCE OC2 Bridge", "0.4.0")]
+public sealed partial class Plugin : BasePlugin
 {
     internal const string Id = "dev.ayce.oc2bridge";
     private const string SupportedBuild = "22894075";
@@ -96,6 +96,10 @@ public sealed class Plugin : BasePlugin
                 Hook(harmony, Find(store, "OnFoodDelivered"), nameof(AfterDelivery), postfix: true);
                 if (applyOverlay)
                 {
+                    if (overlay.CampaignRules != null)
+                        InstallCustomCampaignHooks(harmony, game, unity);
+                    if (overlay.Kitchen != null)
+                        InstallKitchenHooks(harmony, game, unity);
                     if (overlay.Moves.Length > 0)
                     {
                         var highlighter = game.GetType("ClientAnticipateInteractionHighlight", throwOnError: true);
@@ -147,6 +151,8 @@ public sealed class Plugin : BasePlugin
             value.Recipes.Any(s => string.IsNullOrWhiteSpace(s) || s.Length > 150) ||
             value.Recipes.Distinct(StringComparer.Ordinal).Count() != value.Recipes.Length)
             throw new InvalidDataException("Invalid recipe allowlist.");
+        ValidateCampaignRules(value);
+        ValidateKitchen(value);
     }
 
     private static bool IsSupportedStation(string path)
@@ -191,18 +197,24 @@ public sealed class Plugin : BasePlugin
 
     private static void BeforeGridAwake(object __instance)
     {
-        if (sceneHandle != null)
+        if (sceneHandle != null || applyingKitchen)
             return;
         try
         {
             var scene = SceneOf(__instance);
             if (SceneName(scene) != SceneNameToWatch || refusedHandle == Handle(scene))
                 return;
+            if (applyOverlay && overlay.CampaignRules != null && !CustomLaunchPending)
+                return;
             if (applyOverlay && (bool)isSteamLoggedOn.Invoke(null, null))
                 throw new InvalidOperationException("Switch Steam to Offline Mode before testing; no overlay has been applied.");
+            if (applyOverlay && overlay.Kitchen != null)
+                ApplyKitchenOnce(scene);
             if (applyOverlay && overlay.Moves.Length > 0)
                 ApplyMoves(scene);
             sceneHandle = Handle(scene);
+            if (applyOverlay && overlay.CampaignRules != null)
+                BeginCustomRun();
             log.LogInfo($"BRIDGE_SCENE scene={SceneNameToWatch} mode={(applyOverlay ? "overlay" : "observe")} moves={(applyOverlay ? overlay.Moves.Length : 0)}");
         }
         catch (Exception error)
@@ -444,6 +456,10 @@ public sealed class Plugin : BasePlugin
             var handle = Handle(SceneOf(__instance));
             if (refusedHandle == handle)
                 refusedHandle = null;
+            if (failedKitchenHandle == handle)
+                failedKitchenHandle = null;
+            if (kitchenHandle == handle)
+                kitchenHandle = null;
             if (sceneHandle != handle)
                 return;
             allowedOrders = Array.Empty<OrderRecipe>();
@@ -451,6 +467,7 @@ public sealed class Plugin : BasePlugin
             worktopHighlights.Clear();
             ReportedWorktops.Clear();
             sceneHandle = null;
+            EndCustomRun();
             log.LogInfo("BRIDGE_SCENE_EXIT");
         }
         catch (Exception error)

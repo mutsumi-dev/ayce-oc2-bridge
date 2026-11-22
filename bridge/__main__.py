@@ -8,6 +8,7 @@ import sys
 from zipfile import BadZipFile
 
 from .assets import Bundles, ImportErrorDetail, load_bundles, scene_data, xyz
+from .kitchen import kevin2_layout
 
 
 TEMPLATE_RECIPE_ASSETS = {
@@ -55,7 +56,7 @@ def dependency_assets(paths):
     return dict(found.values())
 
 
-def inspect(path, dependencies, selected_scene=None):
+def inspect(path, dependencies, selected_scene=None, include_layout=False):
     files, ignored = load_bundles(path)
     names = {name.lower(): name for name in files}
     bundles = Bundles(files, dependency_assets(dependencies))
@@ -88,7 +89,7 @@ def inspect(path, dependencies, selected_scene=None):
                 item['recipes'] = [bundles.recipe(level, p) for p in ld.get('recipes', []) if p.get('m_PathID')]
                 scene_file = names.get(scene.lower()) or names.get(scene.lower() + '.bundle')
                 item['scene_bundle'] = scene_file
-                item.update(scene_data(bundles, scene_file) if scene_file else {'stations': [], 'mechanics': []})
+                item.update(scene_data(bundles, scene_file, include_layout=include_layout) if scene_file else {'stations': [], 'mechanics': []})
                 if not scene_file:
                     item['diagnostic'] = 'Scene bundle is missing from this release'
                 source['levels'].append(item)
@@ -100,7 +101,7 @@ def inspect(path, dependencies, selected_scene=None):
     return report
 
 
-def target(game, scene):
+def target(game, scene, include_layout=False, dependencies=()):
     if not re.fullmatch(r'[a-zA-Z0-9_]+', scene):
         raise ImportErrorDetail('Invalid target scene name')
     game = Path(game)
@@ -112,7 +113,8 @@ def target(game, scene):
     directory = game / 'Overcooked All You Can Eat_Data/StreamingAssets/aa/Windows/StandaloneWindows64'
     bundle = directory / f'{scene.lower()}_scenes_all.bundle'
     sources, _ = load_bundles(bundle)
-    data = scene_data(Bundles(sources), bundle.name)
+    data = scene_data(Bundles(sources, dependency_assets(dependencies)), bundle.name,
+                      include_layout=include_layout, native=True)
     if not data['stations']:
         raise ImportErrorDetail('No supported station transforms in target scene')
     return {'format': 'ayce-target/1', 'scene': scene.lower(), 'build': match[1], 'gameSha256': fingerprint(live),
@@ -193,10 +195,35 @@ def map_recipes(level, profile, mapping):
     return {**automatically_matched, **explicit}
 
 
+def campaign_rules(level):
+    def positive_int(value, label):
+        if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= 3600:
+            raise ImportErrorDetail(f'Invalid source timing for {label}')
+        return value
+
+    rules = {}
+    for count, source in level['players'].items():
+        if count not in ('1', '2', '3', '4'):
+            raise ImportErrorDetail(f'Unsupported source player count: {count}')
+        stars = [source.get(f'm_{key}StarScore') for key in ('One', 'Two', 'Three', 'Four')]
+        if any(not isinstance(n, int) or isinstance(n, bool) or n < 0 for n in stars) or stars != sorted(stars):
+            raise ImportErrorDetail(f'Invalid source star thresholds for {count} players')
+        rules[count] = {
+            'roundSeconds': positive_int(source.get('roundTime'), 'roundTime'),
+            'orderSeconds': positive_int(source.get('orderLifeTime'), 'orderLifeTime'),
+            'intervalSeconds': positive_int(source.get('timeBetweenOrders'), 'timeBetweenOrders'),
+            'starPoints': stars,
+        }
+    if '1' not in rules:
+        raise ImportErrorDetail('A custom campaign needs a one-player source configuration')
+    return rules
+
+
 def convert(source_path, dependencies, mapping, profile, allow_partial):
     if profile.get('format') != 'ayce-target/1' or profile.get('scene') != mapping.get('targetScene'):
         raise ImportErrorDetail('Mapping target scene and target profile differ')
-    report = inspect(source_path, dependencies, mapping['sourceScene'])
+    want_layout = mapping.get('kitchenLayout') is True
+    report = inspect(source_path, dependencies, mapping['sourceScene'], include_layout=want_layout)
     owned = [(s, l) for s in report['sets'] for l in s['levels']]
     if len(owned) != 1 or not owned[0][1]['scene_bundle']:
         raise ImportErrorDetail('Select exactly one source level with a scene bundle')
@@ -227,6 +254,22 @@ def convert(source_path, dependencies, mapping, profile, allow_partial):
         raise ImportErrorDetail('Overlay retains AYCE geometry and player settings. Review inspection and pass --allow-partial to export it.')
     provenance = {'input': report['input'], 'author': source.get('author'), 'sourceVersion': source.get('version'), 'sourceScene': level['sceneName']}
     result = package(profile, level.get('levelNameZH') or level['levelName'], moves, dict.fromkeys(recipes.values()), provenance)
+    if mapping.get('customEntry'):
+        if profile['scene'] != 's_city_h2' or not recipes:
+            raise ImportErrorDetail('The test entry requires a Kevin 2 menu overlay')
+        result['campaignRules'] = campaign_rules(level)
+        unported['playerSettings'] = {
+            count: {k: v for k, v in row.items() if k in ('plateReturnTime', 'survivalTimeMultiplier')}
+            for count, row in level['players'].items()
+        }
+    if want_layout:
+        if not mapping.get('customEntry'):
+            raise ImportErrorDetail('A kitchen layout requires the F8 custom entry')
+        result['kitchen'], unported['layoutPrefabs'] = kevin2_layout(level, profile)
+        converted = {row['source'] for row in result['kitchen']['placements']}
+        unported['stations'] = [path for path in unported['stations'] if path not in converted]
+        unported['levelGeometry'] = 'Source box colliders and layout; runtime floor and wall visuals; AYCE kitchen props'
+        applied.update(converted)
     return result, {'format': 'ayce-compatibility/1', 'status': 'partial-overlay', 'provenance': provenance,
                     'convertedStations': sorted(applied), 'recipeMappings': recipes, 'notPorted': unported}
 
@@ -238,10 +281,13 @@ def main(argv=None):
     read.add_argument('input')
     read.add_argument('--dependency', action='append', default=[])
     read.add_argument('--scene')
+    read.add_argument('--layout', action='store_true', help='include resolved prefab placements and authored box colliders')
     read.add_argument('--out', required=True)
     scan = commands.add_parser('target', help='inspect one AYCE scene in a local Steam install')
     scan.add_argument('game')
     scan.add_argument('scene')
+    scan.add_argument('--layout', action='store_true', help='include native station and collision candidates')
+    scan.add_argument('--dependency', action='append', default=[], help='resolve references from a local AYCE asset bundle')
     scan.add_argument('--out', required=True)
     demo = commands.add_parser('demo', help='create the AYCE 1-1 dry-run manifest')
     demo.add_argument('profile')
@@ -257,9 +303,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.command == 'inspect':
-            data = inspect(args.input, args.dependency, args.scene)
+            data = inspect(args.input, args.dependency, args.scene, include_layout=args.layout)
         elif args.command == 'target':
-            data = target(args.game, args.scene)
+            data = target(args.game, args.scene, include_layout=args.layout, dependencies=args.dependency)
         elif args.command == 'demo':
             data = make_demo(read_json(args.profile))
         else:

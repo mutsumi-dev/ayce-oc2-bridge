@@ -152,11 +152,12 @@ class Bundles:
             self.unreadable[obj.assets_file.name] += 1
             return None
 
-    def entry(self, name):
+    def entry(self, name, extra_types=()):
+        selected = OBJECT_TYPES | {'MonoBehaviour'} | set(extra_types)
         root = self.env.files[name]
         for serialized in root.files.values():
             for obj in getattr(serialized, 'objects', {}).values():
-                if obj.type.name in OBJECT_TYPES | {'MonoBehaviour'}:
+                if obj.type.name in selected:
                     asset = self.read(obj)
                     if asset is not None:
                         yield asset
@@ -222,8 +223,27 @@ def classify(name, scripts):
     return None
 
 
-def scene_data(bundles, name):
-    entries = list(bundles.entry(name))
+def native_layout_role(name, scripts):
+    for component, role in (
+        ('PlayerIDProvider', 'spawn'), ('PickupItemSpawner', 'dispenser'),
+        ('PlateReturnStation', 'plate_return'), ('MixingStation', 'mixer'),
+        ('MixableContainer', 'mixing_bowl'), ('WashingStation', 'sink'),
+        ('Workstation', 'chopping'), ('CookingStation', 'stove'),
+    ):
+        if component in scripts and (role != 'chopping' or classify(name, {'StaticGridLocation'}) == 'chopping'):
+            return role
+    if 'PlateStation' in scripts:
+        return 'serving'
+    if 'CookableContainer' in scripts and 'steamer' in name.casefold():
+        return 'steamer'
+    if {'StaticGridLocation', 'DynamicGridLocation'} & scripts.keys():
+        return classify(name, {'StaticGridLocation'})
+    return None
+
+
+def scene_data(bundles, name, include_layout=False, native=False):
+    collider_types = ('BoxCollider', 'MeshCollider', 'SphereCollider', 'CapsuleCollider')
+    entries = list(bundles.entry(name, collider_types if include_layout else ()))
     game = {a.key: a for a in entries if a.obj.type.name == 'GameObject'}
     transforms, components = {}, defaultdict(list)
     for asset in entries:
@@ -232,7 +252,7 @@ def scene_data(bundles, name):
             continue
         if asset.obj.type.name in ('Transform', 'RectTransform'):
             transforms[(obj.assets_file.name, obj.path_id)] = asset
-        elif asset.script:
+        elif asset.script or asset.obj.type.name in collider_types:
             components[(obj.assets_file.name, obj.path_id)].append(asset)
 
     def hierarchy(transform, depth=0):
@@ -242,24 +262,29 @@ def scene_data(bundles, name):
         p, q = xyz(data['m_LocalPosition']), xyz(data['m_LocalRotation'], 'xyzw')
         scale = xyz(data['m_LocalScale'])
         go, _ = bundles.ref(transform.obj, data['m_GameObject'])
-        label = game[(go.assets_file.name, go.path_id)].tree['m_Name']
+        parent_game_object = game[(go.assets_file.name, go.path_id)].tree
+        label = parent_game_object['m_Name']
+        is_active = bool(parent_game_object['m_IsActive'])
         parent, _ = bundles.ref(transform.obj, data.get('m_Father'))
         if parent is None:
-            return [label], p, q, scale, False
+            return [label], p, q, scale, False, is_active
         parent_asset = bundles.read(parent)
-        base, pos, rot, size, scaled = hierarchy(parent_asset, depth + 1)
+        base, pos, rot, size, scaled, parent_active = hierarchy(parent_asset, depth + 1)
         delta = rotate(rot, [x*y for x, y in zip(p, size)])
-        return [*base, label], [x+y for x, y in zip(pos, delta)], quat_product(rot, q), [x*y for x, y in zip(size, scale)], scaled or any(abs(x-1) > 0.001 for x in size)
+        return ([*base, label], [x+y for x, y in zip(pos, delta)], quat_product(rot, q),
+                [x*y for x, y in zip(size, scale)], scaled or any(abs(x-1) > 0.001 for x in size),
+                parent_active and is_active)
 
     stations = []
     mechanics = set()
+    placements, boundaries, unresolved = [], [], []
     for key, go in game.items():
-        scripts = {a.script: a for a in components[key]}
+        scripts = {a.script: a for a in components[key] if a.script}
         mechanics.update(s for s in scripts if s.startswith('PseudoPrefab') and s.endswith('Stub') and any(word in s for word in ('Portal', 'Switch', 'Burner', 'Terminal', 'Travelator', 'Conveyor', 'Lockable', 'Spawner', 'AutoWorkstation', 'Pressure')))
         role = classify(go.tree['m_Name'], scripts)
-        if role is None or key not in transforms:
+        if key not in transforms or (role is None and not include_layout):
             continue
-        path, pos, rot, scale, inherited_scale = hierarchy(transforms[key])
+        path, pos, rot, scale, inherited_scale, active_in_hierarchy = hierarchy(transforms[key])
         if any('/' in part for part in path):
             continue
         row = {'path': '/'.join(path), 'role': role, 'position': [round(v, 5) for v in pos],
@@ -270,5 +295,59 @@ def scene_data(bundles, name):
         if 'PseudoPrefabDispenserStub' in scripts:
             dispenser = scripts['PseudoPrefabDispenserStub']
             row['ingredient'] = bundles.describe_reference(dispenser, dispenser.tree.get('spawnerItemPrefabSO'))
-        stations.append(row)
-    return {'stations': sorted(stations, key=lambda r: (r['path'], r['position'])), 'mechanics': sorted(mechanics)}
+        if role is not None:
+            stations.append(row)
+        if not include_layout or not active_in_hierarchy:
+            continue
+        if path[:2] == ['Design', 'Collision']:
+            for collider in components[key]:
+                shape = collider.obj.type.name
+                if shape not in collider_types or not collider.tree.get('m_Enabled', True):
+                    continue
+                if shape != 'BoxCollider' or collider.tree.get('m_IsTrigger') or inherited_scale or any(x <= 0 for x in scale):
+                    unresolved.append({'path': row['path'], 'reason': f'{shape} requires manual collision conversion'})
+                    continue
+                size = xyz(collider.tree['m_Size'])
+                center = xyz(collider.tree['m_Center'])
+                translated = rotate(rot, [a*b for a, b in zip(center, scale)])
+                if any(x <= 0 for x in size):
+                    raise ImportErrorDetail(f'Non-positive collision size at {row["path"]}')
+                boundaries.append({'path': row['path'], 'layer': go.tree['m_Layer'],
+                                   'position': [round(a+b, 5) for a, b in zip(pos, translated)],
+                                   'rotation': row['rotation'], 'size': [round(a*b, 5) for a, b in zip(size, scale)]})
+        if native:
+            layout_role = native_layout_role(go.tree['m_Name'], scripts)
+            if path[:2] == ['Design', 'Plates'] and len(path) == 3 and go.tree['m_Name'].startswith('equipment_plate_01'):
+                layout_role = 'plate'
+            if 'FireExtinguishSpray' in scripts:
+                layout_role = 'extinguisher'
+            if layout_role and path[0] in ('Design', 'Chefs'):
+                placement = {**row, 'role': layout_role, 'components': sorted(scripts)}
+                if 'PickupItemSpawner' in scripts:
+                    spawner = scripts['PickupItemSpawner']
+                    placement['ingredient'] = bundles.describe_reference(spawner, spawner.tree.get('m_itemPrefab'))
+                placements.append(placement)
+            continue
+        for component in scripts.values():
+            if not (component.script.startswith('PseudoPrefab') and component.script.endswith('Stub')):
+                continue
+            prefab = bundles.describe_reference(component, component.tree.get('pseudoPrefabSO'))
+            if not prefab and not path[:1] == ['Design']:
+                continue
+            if len(path) < 2 or path[0] not in ('Design', 'Chefs'):
+                continue
+            if not prefab or not prefab.get('assetPath'):
+                unresolved.append({'path': row['path'], 'reason': f'{component.script} has no resolved prefab'})
+            added = {**row, 'stub': component.script, 'prefab': prefab}
+            if 'playerID' in component.tree:
+                added['playerIndex'] = component.tree['playerID']
+            for field in ('capacity', 'plateCount', 'returnClean', 'conveySpeed'):
+                if field in component.tree:
+                    added[field] = component.tree[field]
+            placements.append(added)
+    result = {'stations': sorted(stations, key=lambda r: (r['path'], r['position'])), 'mechanics': sorted(mechanics)}
+    if include_layout:
+        result['layout'] = {'placements': sorted(placements, key=lambda row: row['path']),
+                            'boxColliders': sorted(boundaries, key=lambda row: row['path']),
+                            'unresolved': sorted(unresolved, key=lambda row: row['path'])}
+    return result
