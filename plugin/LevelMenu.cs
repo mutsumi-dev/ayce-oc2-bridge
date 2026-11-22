@@ -20,18 +20,18 @@ public sealed partial class Plugin
     private static LevelCatalog ReadLocalLevels(string directory, Overlay defaultLevel)
     {
         var levels = new List<LocalLevel>();
-        if (defaultLevel?.Kitchen != null)
+        if (defaultLevel?.HasKitchen == true)
             levels.Add(new LocalLevel(defaultLevel, "active.json"));
         if (!Directory.Exists(directory))
             return new LevelCatalog(levels.ToArray(), 0);
 
         var rejected = 0;
-        foreach (var path in Directory.EnumerateFiles(directory, "*.json").OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase).Take(100))
+        foreach (var path in Directory.EnumerateFiles(directory, "*.json").OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase))
         {
             try
             {
                 var imported = ReadOverlay(path);
-                if (imported.Kitchen == null)
+                if (!imported.HasKitchen)
                     throw new InvalidDataException("The package does not include a playable kitchen layout.");
                 levels.Add(new LocalLevel(imported, Path.GetFileName(path)));
             }
@@ -64,6 +64,7 @@ public sealed partial class Plugin
             Hook(harmony, Find(levelMenuUi.Button, "OnPointerClick"), nameof(BeforeMenuPointerClick));
             Hook(harmony, Find(levelMenuUi.Button, "OnSubmit"), nameof(BeforeMenuSubmit));
             InstallLevelMenuReturnHooks(harmony, game);
+            InstallStandaloneLaunch(harmony, game);
             log.LogInfo("BRIDGE_MENU_READY source=ExtraTrimmings");
         }
         catch (Exception error)
@@ -77,7 +78,6 @@ public sealed partial class Plugin
     {
         if (!__result)
             return;
-        CancelMenuLaunch();
         CloseLevelMenu();
         try
         {
@@ -109,16 +109,15 @@ public sealed partial class Plugin
     private static void AfterMainMenuShow(object __instance, bool __result)
     {
         if (__result)
-        {
-            CancelMenuLaunch();
             MarkLevelMenuFrontendReady(__instance);
-        }
     }
 
     private static void CloseLevelMenu()
     {
         var view = levelMenu;
         levelMenu = null;
+        if (view != null)
+            CancelStandaloneRequest();
         try { view?.Dispose(); }
         catch (Exception error) { log.LogWarning($"BRIDGE_MENU_CLOSE_ERROR {error.Message}"); }
     }
@@ -146,6 +145,8 @@ public sealed partial class Plugin
         private object nativeNeighbor;
         private object originalNavigation;
         private LevelCatalog catalog;
+        private Dictionary<string, LocalScore> scores;
+        private int localPlayers;
 
         internal int ExtraId { get; }
 
@@ -198,6 +199,8 @@ public sealed partial class Plugin
             if (panel != null)
                 return;
             catalog = ReadLocalLevels(Path.Combine(Paths.PluginPath, "AyceOc2Bridge", "levels"), installedOverlay);
+            scores = ReadScoresForMenu();
+            localPlayers = LocalPlayerCount();
             ShowPage(0);
             log.LogInfo($"BRIDGE_MENU_OPEN levels={catalog.Levels.Length} rejected={catalog.Rejected}");
         }
@@ -212,9 +215,9 @@ public sealed partial class Plugin
             ui.Paint(content, .09f, .15f, .21f, 1f);
             var body = Get(content, "transform");
             ui.Label(body, font, "自定义关卡", .07f, .84f, .93f, .97f, 36, centered: false);
-            status = ui.Label(body, font, "离线游玩。选择已解锁凯文 2 的 OC2 存档。", .07f, .76f, .93f, .86f, 22, centered: false);
+            status = ui.Label(body, font, "选择关卡即可离线开局。", .07f, .76f, .93f, .86f, 22, centered: false);
             if (catalog.Rejected != 0)
-                Set(status, "text", $"离线游玩。需要已解锁凯文 2 的存档。{catalog.Rejected} 个关卡包未通过检查。");
+                Set(status, "text", $"选择关卡即可离线开局。{catalog.Rejected} 个关卡包未通过检查。");
 
             var visible = new List<object>();
             var rows = catalog.Levels.Skip(page * LevelsPerPage).Take(LevelsPerPage).ToArray();
@@ -223,7 +226,9 @@ public sealed partial class Plugin
                 var level = rows[index];
                 var author = level.Overlay.Provenance?.Author;
                 var release = level.Overlay.Provenance?.Version;
-                var details = string.Join("  ·  ", new[] { author, release, level.Path }.Where(value => !string.IsNullOrWhiteSpace(value)));
+                scores.TryGetValue(ScoreKey(level.Overlay, localPlayers), out var best);
+                var result = best == null ? "尚无成绩" : $"{localPlayers} 人最高 {best.Points} 分 · {best.Stars} 星";
+                var details = string.Join("  ·  ", new[] { author, release, result }.Where(value => !string.IsNullOrWhiteSpace(value)));
                 var label = $"{Limit(level.Overlay.Name, 52)}\n{Limit(details, 90)}";
                 var top = .735f - index * .102f;
                 visible.Add(AddButton(body, label, .07f, top - .089f, .93f, top, () => SelectLevel(level)));
@@ -258,22 +263,20 @@ public sealed partial class Plugin
                 Set(status, "text", "请将 Steam 切换为离线模式，再选择关卡。");
                 return;
             }
-            try
-            {
-                ui.OpenSaveSelection(Get(extra, "m_frontendRootMenu"));
-                QueueMenuLaunch(level.Overlay);
-                log.LogInfo($"BRIDGE_MENU_SELECTED kitchen={level.Overlay.Name} path={level.Path}");
-                CloseLevelMenu();
-            }
-            catch
-            {
-                CancelMenuLaunch();
-                throw;
-            }
+            BeginStandaloneLevel(level.Overlay);
+            ShowStatus("正在准备本地厨房…");
+            log.LogInfo($"BRIDGE_MENU_SELECTED kitchen={level.Overlay.Name} path={level.Path}");
+        }
+
+        internal void ShowStatus(string message)
+        {
+            if (status != null)
+                Set(status, "text", message);
         }
 
         private void ReturnToExtras()
         {
+            CancelStandaloneRequest();
             RemovePanel();
             ui.Activate(Get(entry, "gameObject"), true);
             Focus(entry);

@@ -14,7 +14,53 @@ internal sealed class Overlay
     [JsonPropertyName("recipeAllowlist")] public string[] Recipes { get; set; }
     [JsonPropertyName("campaignRules")] public Dictionary<string, CampaignRules> CampaignRules { get; set; }
     [JsonPropertyName("kitchen")] public KitchenLayout Kitchen { get; set; }
+    [JsonPropertyName("stockKitchen")] public StockKitchen Stock { get; set; }
     [JsonPropertyName("provenance")] public LevelProvenance Provenance { get; set; }
+    [JsonIgnore] public bool HasKitchen => Kitchen != null || Stock != null;
+}
+
+internal sealed class StockKitchen
+{
+    [JsonPropertyName("stations")] public StockStation[] Stations { get; set; }
+    [JsonPropertyName("boxColliders")] public KitchenBox[] Boxes { get; set; }
+    [JsonPropertyName("recipes")] public StockRecipe[] Recipes { get; set; }
+    [JsonPropertyName("donors")] public Dictionary<string, StockDonor> Donors { get; set; }
+    [JsonPropertyName("art")] public string Art { get; set; }
+    [JsonPropertyName("artOffset")] public float[] ArtOffset { get; set; }
+    [JsonPropertyName("artTheme")] public string ArtTheme { get; set; }
+    [JsonPropertyName("floorTexture")] public string FloorTexture { get; set; }
+}
+
+internal sealed class StockStation
+{
+    [JsonPropertyName("id")] public string Id { get; set; }
+    [JsonPropertyName("role")] public string Role { get; set; }
+    [JsonPropertyName("scene")] public string Scene { get; set; }
+    [JsonPropertyName("path")] public string Path { get; set; }
+    [JsonPropertyName("position")] public float[] Position { get; set; }
+    [JsonPropertyName("rotation")] public float[] Rotation { get; set; }
+    [JsonPropertyName("support")] public string Support { get; set; }
+    [JsonPropertyName("ingredient")] public string Ingredient { get; set; }
+    [JsonPropertyName("capacity")] public int Capacity { get; set; }
+    [JsonPropertyName("plateCount")] public int PlateCount { get; set; }
+    [JsonPropertyName("returnStack")] public string ReturnStack { get; set; }
+    [JsonPropertyName("returnStations")] public string[] ReturnStations { get; set; }
+    [JsonPropertyName("allowedIngredients")] public string[] AllowedIngredients { get; set; }
+    [JsonPropertyName("unresolvedIngredients")] public string[] UnresolvedIngredients { get; set; }
+    [JsonPropertyName("allowedCookingStationTypes")] public int[] AllowedCookingStationTypes { get; set; }
+}
+
+internal sealed class StockRecipe
+{
+    [JsonPropertyName("addressKey")] public string Address { get; set; }
+    [JsonPropertyName("nativeType")] public string NativeType { get; set; }
+    [JsonPropertyName("score")] public int? Score { get; set; }
+}
+
+internal sealed class StockDonor
+{
+    [JsonPropertyName("path")] public string Path { get; set; }
+    [JsonPropertyName("dependencies")] public string[] Dependencies { get; set; }
 }
 
 internal sealed class LevelProvenance
@@ -39,6 +85,7 @@ internal sealed class KitchenPlacement
     [JsonPropertyName("clone")] public bool Clone { get; set; }
     [JsonPropertyName("support")] public string Support { get; set; }
     [JsonPropertyName("reparent")] public bool Reparent { get; set; }
+    [JsonPropertyName("capacity")] public int Capacity { get; set; }
     [JsonPropertyName("position")] public float[] Position { get; set; }
     [JsonPropertyName("rotation")] public float[] Rotation { get; set; }
 }

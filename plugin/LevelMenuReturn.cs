@@ -36,13 +36,17 @@ public sealed partial class Plugin
     private static void BeforeCustomOutro()
     {
         if (customRun && customRoundFromMenu)
+        {
             customRoundCompleted = true;
+            PersistLocalScore();
+        }
     }
 
     private static void BeginLevelMenuReturn()
     {
         if (!customRun || !customRoundFromMenu || !customRoundCompleted)
             return;
+        PersistLocalScore();
         menuReturn = MenuReturn.WorldMap;
         menuReturnDeadline = Environment.TickCount64 + 90_000;
         nextReturnStep = 0;

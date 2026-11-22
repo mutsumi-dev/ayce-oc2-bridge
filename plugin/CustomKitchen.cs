@@ -71,6 +71,7 @@ public sealed partial class Plugin
                 move.Role == null || !KitchenRoles.ContainsKey(move.Role) || !source.TryAdd(move.Source, move) ||
                 (!move.Clone && !original.TryAdd(move.Target, move.Role)) || InactiveTemplateObjects.Contains(move.Target) ||
                 !ValidVector(move.Position, 3) || move.Position.Any(n => Math.Abs(n) > 32f) || !LayoutRotation(move.Rotation) ||
+                move.Capacity is < 0 or > 30 || (move.Capacity > 0 && move.Role is not ("mixing_bowl" or "steamer")) ||
                 move.Reparent != move.Target.StartsWith("Design/Animated Objects/", StringComparison.Ordinal))
                 throw new InvalidDataException($"Invalid kitchen placement: {move?.Source}.");
         }
@@ -147,6 +148,8 @@ public sealed partial class Plugin
         var physics = Assembly.Load("UnityEngine.PhysicsModule");
         kitchenBoxCollider = GenericGameObjectMethod("GetComponent", physics.GetType("UnityEngine.BoxCollider", throwOnError: true));
         syncPhysics = Find(physics.GetType("UnityEngine.Physics", throwOnError: true), "SyncTransforms", Type.EmptyTypes);
+        InstallKitchenRules(game, unity);
+        InstallKitchenPresentation(harmony, game);
         Hook(harmony, Find(level, "Awake", Type.EmptyTypes), nameof(BeforeLayoutLevelAwake));
         Hook(harmony, Find(serverAttach, "AttachInitialObjects", Type.EmptyTypes), nameof(BeforeAttachKitchenProps));
     }
@@ -168,6 +171,12 @@ public sealed partial class Plugin
             if ((bool)isSteamLoggedOn.Invoke(null, null))
                 throw new InvalidOperationException("Steam Offline Mode is required for the custom kitchen.");
             ApplyKitchenOnce(scene);
+            if (overlay.Stock != null && sceneHandle == null)
+            {
+                sceneHandle = handle;
+                BeginCustomRun();
+                log.LogInfo($"BRIDGE_SCENE scene={overlay.Scene} mode=stock-kitchen");
+            }
         }
         catch (Exception error)
         {
@@ -182,14 +191,20 @@ public sealed partial class Plugin
         if (kitchenHandle == handle)
             return;
         applyingKitchen = true;
+        ClearKitchenRules();
         try
         {
-            PlaceCustomKitchen(scene, overlay.Kitchen);
+            if (overlay.Stock == null)
+                PlaceCustomKitchen(scene, overlay.Kitchen);
+            else
+                PlaceStockKitchen(scene, overlay.Stock);
             kitchenHandle = handle;
         }
         catch
         {
+            ClearKitchenRules();
             failedKitchenHandle = handle;
+            customRestart = null;
             launchExpires = 0;
             throw;
         }
@@ -286,6 +301,15 @@ public sealed partial class Plugin
                     position = new[] { (float)Get(anchor, "x"), (float)Get(anchor, "y") + .04f, (float)Get(anchor, "z") };
                 }
                 SetTransform(transform, Vector(position), Rotation(move.Rotation));
+                if (move.Capacity > 0)
+                {
+                    var container = kitchenIngredientContainer.Invoke(Get(transform, "gameObject"), null) ??
+                        throw new InvalidDataException($"Missing native container for {move.Source}.");
+                    var originalCapacity = (int)Get(container, "m_capacity");
+                    rollback.Push(() => Set(container, "m_capacity", originalCapacity));
+                    Set(container, "m_capacity", move.Capacity);
+                    log.LogInfo($"BRIDGE_KITCHEN_CAPACITY item={move.Source} native={originalCapacity} authored={move.Capacity}");
+                }
             }
             // The template origin is relative to the grid object's transform. Keep it in native space.
             ValidateKitchenGrid(grid, kitchen.Placements, resolved);
@@ -489,7 +513,7 @@ public sealed partial class Plugin
             (AccessTools.Field(type, member) ?? throw new MissingMemberException(type.FullName, member)).SetValue(owner, value);
     }
 
-    private static void CreateKitchenCube(object parent, string name, float[] position, float[] rotation, float[] size,
+    private static object CreateKitchenCube(object parent, string name, float[] position, float[] rotation, float[] size,
         int layer, bool collision, bool visible)
     {
         var cube = kitchenCreatePrimitive.Invoke(null, new[] { kitchenCube });
@@ -503,5 +527,6 @@ public sealed partial class Plugin
             Set(kitchenBoxCollider.Invoke(cube, null), "enabled", false);
         if (!visible)
             Set(kitchenMeshRenderer.Invoke(cube, null), "enabled", false);
+        return cube;
     }
 }

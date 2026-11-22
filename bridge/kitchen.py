@@ -91,13 +91,16 @@ def kevin2_layout(level, profile):
                 if len(matches) != 1:
                     raise ImportErrorDetail(f'Expected one work surface for {original["path"]}')
                 support = matches[0]
-            placements.append({
+            placement = {
                 'source': original['path'], 'target': path, 'role': role,
                 'clone': index >= count - copies, 'support': support,
                 'reparent': bool(native.get('moving_parent')),
                 'position': offset(original['position'], -0.5 if role == 'spawn' else 0.0),
                 'rotation': original['rotation'],
-            })
+            }
+            if role in ('mixing_bowl', 'steamer') and 'capacity' in original:
+                placement['capacity'] = original['capacity']
+            placements.append(placement)
 
     boxes = [{**box, 'position': offset(box['position'])} for box in source['boxColliders']]
     if sorted(box['layer'] for box in boxes) != [9] + [10] * 8:

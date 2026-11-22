@@ -9,7 +9,7 @@ import UnityPy
 
 
 UNITY_SIGNATURES = (b'UnityFS\0', b'UnityRaw\0', b'UnityWeb\0')
-MAX_MEMBER = 96 * 1024 * 1024
+MAX_MEMBER = 192 * 1024 * 1024
 MAX_TOTAL = 384 * 1024 * 1024
 MAX_ENTRIES = 2048
 EXECUTABLE = {'.dll', '.exe', '.bat', '.cmd', '.ps1', '.js', '.vbs', '.scr', '.lnk', '.msi'}
@@ -26,6 +26,12 @@ ROLE_NAMES = {
     'counter': r'counter',
 }
 OBJECT_TYPES = {'GameObject', 'Transform', 'RectTransform'}
+RECIPE_REFERENCE_LISTS = ('compositionSOs', 'optionalSOs')
+RECIPE_REFERENCE_FIELDS = ('platingStepSO', 'modelSO', 'model', 'iconSO', 'icon', 'cookingStepSO',
+                           'cookingStepIconSO', 'cookingStepIcon', 'mixingIconSO', 'mixingIcon')
+MECHANIC_STUBS = ('portal', 'switch', 'burner', 'terminal', 'travelator', 'conveyor', 'lockable',
+                  'attachingfoodspawner', 'autoworkstation', 'flamethrower', 'ingredientspray', 'servingstationhorde')
+MECHANIC_PREFAB_NAMES = ('teleportal', 'pressureswitch', 'floorburner', 'travelator', 'conveyor', 'flamethrower')
 
 
 class ImportErrorDetail(ValueError):
@@ -57,13 +63,15 @@ def load_bundles(path, required=True):
             header = stream.read(12)
             if not header.startswith(UNITY_SIGNATURES):
                 return
+            if size < len(header):
+                raise ImportErrorDetail(f'Unexpected file size for {leaf}')
             if size > MAX_MEMBER or total + size > MAX_TOTAL:
                 raise ImportErrorDetail(f'Asset bundle exceeds the import size limit: {leaf}')
             if leaf.name.lower() in seen:
                 raise ImportErrorDetail(f'Duplicate asset-bundle filename: {leaf.name}')
             seen.add(leaf.name.lower())
             total += size
-            files[leaf.name] = header + stream.read(MAX_MEMBER + 1)
+            files[leaf.name] = header + stream.read(size - len(header) + 1)
             if len(files[leaf.name]) != size:
                 raise ImportErrorDetail(f'Unexpected file size for {leaf}')
 
@@ -178,6 +186,8 @@ class Bundles:
             for field in ('prefabName', 'bundleName', 'assetPath'):
                 if target.tree.get(field):
                     result[field] = target.tree[field]
+        if target and target.script == 'PseudoPrefabSORecipe' and 'score' in target.tree:
+            result['score'] = target.tree['score']
         return result
 
     def recipe(self, level, ptr):
@@ -186,13 +196,46 @@ class Bundles:
         target = self.read(obj) if obj is not None else None
         if target is None or not (target.script or '').startswith('CustomRecipe'):
             return result
-        result['definition'] = {k: target.tree[k] for k in ('type', 'recipeName', 'uID', 'score', 'cookingProgress', 'mixingProgress') if k in target.tree}
-        for name in ('compositionSOs', 'optionalSOs'):
-            result['definition'][name] = [self.describe_reference(target, p) for p in target.tree.get(name, []) if p.get('m_PathID')]
-        for name in ('platingStepSO', 'modelSO', 'model', 'iconSO', 'icon', 'cookingStepSO', 'cookingStepIconSO'):
-            if target.tree.get(name, {}).get('m_PathID'):
-                result['definition'][name] = self.describe_reference(target, target.tree[name])
+        result['definition'], _ = self.recipe_definition(target)
         return result
+
+    def recipe_definition(self, asset):
+        data = asset.tree
+        definition = {key: data[key] for key in ('type', 'recipeName', 'uID', 'score', 'cookingProgress', 'mixingProgress') if key in data}
+        links = []
+        for name in RECIPE_REFERENCE_LISTS:
+            pointers = [ptr for ptr in data.get(name, []) if ptr.get('m_PathID')]
+            definition[name] = [self.describe_reference(asset, ptr) for ptr in pointers]
+            links.extend(pointers)
+        for name in RECIPE_REFERENCE_FIELDS:
+            ptr = data.get(name) or {}
+            if ptr.get('m_PathID'):
+                definition[name] = self.describe_reference(asset, ptr)
+                links.append(ptr)
+        return definition, links
+
+    def recipe_graph(self, level, pointers):
+        pending = [(level, ptr) for ptr in reversed(pointers)]
+        nodes = {}
+        while pending:
+            owner, ptr = pending.pop()
+            obj, ref = self.ref(owner.obj, ptr)
+            key = ref.casefold()
+            if key in nodes:
+                continue
+            if len(nodes) >= 4096:
+                raise ImportErrorDetail('Recipe dependency graph exceeds 4096 assets')
+            description = self.describe_reference(owner, ptr)
+            target = self.read(obj) if obj is not None else None
+            description['resolved'] = target is not None
+            nodes[key] = description
+            if target is not None and (target.script or '').startswith('CustomRecipe'):
+                description['definition'], linked = self.recipe_definition(target)
+                pending.extend((target, child) for child in reversed(linked))
+        return {
+            'roots': [self.ref(level.obj, ptr)[1].casefold() for ptr in pointers],
+            'nodes': nodes,
+        }
 
 
 def xyz(data, fields='xyz'):
@@ -280,7 +323,8 @@ def scene_data(bundles, name, include_layout=False, native=False):
     placements, boundaries, unresolved = [], [], []
     for key, go in game.items():
         scripts = {a.script: a for a in components[key] if a.script}
-        mechanics.update(s for s in scripts if s.startswith('PseudoPrefab') and s.endswith('Stub') and any(word in s for word in ('Portal', 'Switch', 'Burner', 'Terminal', 'Travelator', 'Conveyor', 'Lockable', 'Spawner', 'AutoWorkstation', 'Pressure')))
+        mechanics.update(script for script in scripts if script.startswith('PseudoPrefab') and script.endswith('Stub')
+                         and any(word in script.casefold() for word in MECHANIC_STUBS))
         role = classify(go.tree['m_Name'], scripts)
         if key not in transforms or (role is None and not include_layout):
             continue
@@ -311,7 +355,8 @@ def scene_data(bundles, name, include_layout=False, native=False):
                 center = xyz(collider.tree['m_Center'])
                 translated = rotate(rot, [a*b for a, b in zip(center, scale)])
                 if any(x <= 0 for x in size):
-                    raise ImportErrorDetail(f'Non-positive collision size at {row["path"]}')
+                    unresolved.append({'path': row['path'], 'reason': 'BoxCollider has a non-positive dimension'})
+                    continue
                 boundaries.append({'path': row['path'], 'layer': go.tree['m_Layer'],
                                    'position': [round(a+b, 5) for a, b in zip(pos, translated)],
                                    'rotation': row['rotation'], 'size': [round(a*b, 5) for a, b in zip(size, scale)]})
@@ -338,12 +383,41 @@ def scene_data(bundles, name, include_layout=False, native=False):
                 continue
             if not prefab or not prefab.get('assetPath'):
                 unresolved.append({'path': row['path'], 'reason': f'{component.script} has no resolved prefab'})
+            else:
+                name = PurePosixPath(prefab['assetPath'].replace('\\', '/')).stem
+                if component.script == 'PseudoPrefabStub' and any(word in name.casefold() for word in MECHANIC_PREFAB_NAMES):
+                    mechanics.add(f'Prefab:{name.casefold()}')
+            if row.get('moving_parent'):
+                mechanics.add('AnimatedSourcePlacements')
             added = {**row, 'stub': component.script, 'prefab': prefab}
             if 'playerID' in component.tree:
                 added['playerIndex'] = component.tree['playerID']
             for field in ('capacity', 'plateCount', 'returnClean', 'conveySpeed'):
                 if field in component.tree:
                     added[field] = component.tree[field]
+            added['sourceObject'] = f'{key[0]}:{key[1]}'
+            if component.script == 'PseudoPrefabCookingUtensilStub':
+                added['allowedIngredients'] = [bundles.recipe(component, pointer) for pointer in component.tree.get('allowedIngredientSOs', [])
+                                                if pointer.get('m_PathID')]
+                added['allowedCookingStationTypes'] = component.tree.get('allowedCookingStationTypes', [])
+            if component.script == 'PseudoPrefabPlateReturnStub':
+                field = 'cleanPlateStackSO' if component.tree.get('returnClean') else 'dirtyPlateStackSO'
+                added['returnStackPrefab'] = bundles.describe_reference(component, component.tree.get(field))
+            if component.script == 'PseudoPrefabCleanPlateStackStub':
+                added['servingContainerPrefab'] = bundles.describe_reference(component, component.tree.get('platePseudoPrefabSO'))
+            if component.script == 'PseudoPrefabServingStationStub':
+                links = [component.tree.get('plateReturn'), *(component.tree.get('plateReturns') or [])]
+                keys = []
+                for pointer in links:
+                    item, _ = bundles.ref(component.obj, pointer)
+                    if item is None:
+                        continue
+                    if item.type.name != 'GameObject':
+                        target = bundles.read(item)
+                        item, _ = bundles.ref(item, target.tree.get('m_GameObject') if target else None)
+                    if item is not None:
+                        keys.append(f'{item.assets_file.name}:{item.path_id}')
+                added['returnLinks'] = list(dict.fromkeys(keys))
             placements.append(added)
     result = {'stations': sorted(stations, key=lambda r: (r['path'], r['position'])), 'mechanics': sorted(mechanics)}
     if include_layout:

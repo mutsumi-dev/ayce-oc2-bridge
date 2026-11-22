@@ -13,7 +13,7 @@ using HarmonyLib;
 
 namespace AyceOc2Bridge;
 
-[BepInPlugin(Id, "AYCE OC2 Bridge", "0.5.3")]
+[BepInPlugin(Id, "AYCE OC2 Bridge", "0.7.8")]
 public sealed partial class Plugin : BasePlugin
 {
     internal const string Id = "dev.ayce.oc2bridge";
@@ -36,6 +36,7 @@ public sealed partial class Plugin : BasePlugin
     private static int? refusedHandle;
     private static OrderRecipe[] allowedOrders = Array.Empty<OrderRecipe>();
     private static int nextReplacement;
+    private static OrderRecipe[] shuffledOrders = Array.Empty<OrderRecipe>();
     private static Dictionary<int, WorktopHighlight> worktopHighlights = new();
     private static readonly HashSet<int> ReportedWorktops = new();
 
@@ -94,8 +95,11 @@ public sealed partial class Plugin : BasePlugin
                 {
                     if (overlay.CampaignRules != null)
                         InstallCustomCampaignHooks(harmony, game, unity);
-                    if (overlay.Kitchen != null)
+                    if (overlay.HasKitchen)
+                    {
                         InstallKitchenHooks(harmony, game, unity);
+                        TryInstallStockKitchenHooks(game, unity);
+                    }
                     if (overlay.Moves.Length > 0)
                     {
                         var highlighter = game.GetType("ClientAnticipateInteractionHighlight", throwOnError: true);
@@ -119,7 +123,7 @@ public sealed partial class Plugin : BasePlugin
                 throw;
             }
             log.LogInfo($"BRIDGE_READY mode={(applyOverlay ? "overlay" : "observe")} build={SupportedBuild} scene={SceneNameToWatch}");
-            if (applyOverlay && installedOverlay.Kitchen != null)
+            if (applyOverlay && installedOverlay.HasKitchen)
                 TryInstallLevelMenu(game, unity);
         }
         catch (Exception error)
@@ -155,12 +159,13 @@ public sealed partial class Plugin : BasePlugin
                 Math.Abs(move.Rotation.Sum(v => v * v) - 1f) > .005f)
                 throw new InvalidDataException($"Invalid move for {move?.Path}.");
         }
-        if (value.Recipes == null || value.Recipes.Length > 30 || (value.Moves.Length == 0 && value.Recipes.Length == 0) ||
-            value.Recipes.Any(s => string.IsNullOrWhiteSpace(s) || s.Length > 150) ||
+        if (value.Recipes == null || value.Recipes.Length > (value.Stock == null ? 30 : 100) || (value.Moves.Length == 0 && value.Recipes.Length == 0) ||
+            value.Recipes.Any(s => string.IsNullOrWhiteSpace(s) || s.Length > 225) ||
             value.Recipes.Distinct(StringComparer.Ordinal).Count() != value.Recipes.Length)
             throw new InvalidDataException("Invalid recipe allowlist.");
         ValidateCampaignRules(value);
         ValidateKitchen(value);
+        ValidateStockKitchen(value);
     }
 
     private static bool IsSupportedStation(string path)
@@ -216,7 +221,7 @@ public sealed partial class Plugin : BasePlugin
                 return;
             if (applyOverlay && (bool)isSteamLoggedOn.Invoke(null, null))
                 throw new InvalidOperationException("Switch Steam to Offline Mode before testing; no overlay has been applied.");
-            if (applyOverlay && overlay.Kitchen != null)
+            if (applyOverlay && overlay.HasKitchen)
                 ApplyKitchenOnce(scene);
             if (applyOverlay && overlay.Moves.Length > 0)
                 ApplyMoves(scene);
@@ -356,10 +361,15 @@ public sealed partial class Plugin : BasePlugin
     {
         if (sceneHandle == null)
             return;
-        allowedOrders = Array.Empty<OrderRecipe>();
-        nextReplacement = 0;
+        ResetOrderSelection();
         try
         {
+            if (overlay?.Stock != null)
+            {
+                RepairStockGrid(activate: true);
+                ApplyStockOrders();
+                return;
+            }
             var recipeList = Get(__instance, "m_recipes");
             var entries = Get(recipeList, "m_recipes");
             var candidates = ((IEnumerable)entries).Cast<object>().Select(entry => new OrderRecipe(entry, RecipeName(entry))).ToArray();
@@ -393,14 +403,16 @@ public sealed partial class Plugin : BasePlugin
             {
                 var index = new[] { Convert.ChangeType(i, indexType) };
                 var requested = RecipeName(indexer.GetValue(__result, index));
-                if (allowedOrders.Any(recipe => recipe.Name == requested))
+                var randomize = customRun && overlay?.HasKitchen == true;
+                if (!randomize && allowedOrders.Any(recipe => recipe.Name == requested))
                     continue;
-                var replacement = allowedOrders[nextReplacement];
+                var replacement = randomize ? DrawCustomOrder() : allowedOrders[nextReplacement];
                 indexer.SetValue(__result, replacement.Entry, index);
                 var selected = RecipeName(indexer.GetValue(__result, index));
                 if (selected != replacement.Name)
                     throw new InvalidOperationException("The native selection array did not keep the replacement.");
-                nextReplacement = (nextReplacement + 1) % allowedOrders.Length;
+                if (!randomize)
+                    nextReplacement = (nextReplacement + 1) % allowedOrders.Length;
                 log.LogInfo($"BRIDGE_RECIPE_SELECTED requested={requested} selected={selected}");
             }
         }
@@ -408,6 +420,35 @@ public sealed partial class Plugin : BasePlugin
         {
             log.LogWarning($"BRIDGE_RECIPE_SELECTION_SKIPPED {error}");
         }
+    }
+
+    private static OrderRecipe DrawCustomOrder()
+    {
+        if (nextReplacement == 0)
+        {
+            var previous = shuffledOrders.LastOrDefault();
+            shuffledOrders = (OrderRecipe[])allowedOrders.Clone();
+            for (int i = shuffledOrders.Length - 1; i > 0; i--)
+            {
+                var j = Random.Shared.Next(i + 1);
+                (shuffledOrders[i], shuffledOrders[j]) = (shuffledOrders[j], shuffledOrders[i]);
+            }
+            if (shuffledOrders.Length > 1 && shuffledOrders[0] == previous)
+            {
+                var j = Random.Shared.Next(1, shuffledOrders.Length);
+                (shuffledOrders[0], shuffledOrders[j]) = (shuffledOrders[j], shuffledOrders[0]);
+            }
+        }
+        var selected = shuffledOrders[nextReplacement];
+        nextReplacement = (nextReplacement + 1) % shuffledOrders.Length;
+        return selected;
+    }
+
+    private static void ResetOrderSelection()
+    {
+        allowedOrders = Array.Empty<OrderRecipe>();
+        shuffledOrders = Array.Empty<OrderRecipe>();
+        nextReplacement = 0;
     }
 
     private static PropertyInfo FindIndexer(object collection) => collection.GetType().GetProperty("Item")
@@ -462,25 +503,48 @@ public sealed partial class Plugin : BasePlugin
         try
         {
             var handle = Handle(SceneOf(__instance));
-            if (failedKitchenHandle == handle || kitchenHandle == handle || sceneHandle == handle)
-                overlay = installedOverlay ?? overlay;
+            var restart = customRestart;
+            var restarting = sceneHandle == handle && restart?.SceneHandle == handle && Environment.TickCount64 < restart.Deadline;
+            var wasCustomKitchen = failedKitchenHandle == handle || kitchenHandle == handle;
             if (refusedHandle == handle)
                 refusedHandle = null;
             if (failedKitchenHandle == handle)
+            {
                 failedKitchenHandle = null;
+                ReleaseStockKitchen();
+            }
             if (kitchenHandle == handle)
             {
                 kitchenHandle = null;
                 kitchenProps.Clear();
+                ClearKitchenRules();
+                if (restarting)
+                    ReleaseStockRoundAssets();
+                else
+                    ReleaseStockKitchen();
             }
             if (sceneHandle != handle)
+            {
+                if (wasCustomKitchen)
+                    overlay = installedOverlay ?? overlay;
                 return;
-            allowedOrders = Array.Empty<OrderRecipe>();
-            nextReplacement = 0;
+            }
+            ResetOrderSelection();
             worktopHighlights.Clear();
             ReportedWorktops.Clear();
             sceneHandle = null;
+            if (restarting)
+            {
+                if (customRoundCompleted)
+                    PersistLocalScore();
+                EndCustomRun();
+                launchFromLevelMenu = restart.FromMenu;
+                launchExpires = restart.Deadline;
+                return;
+            }
+            customRestart = null;
             BeginLevelMenuReturn();
+            overlay = installedOverlay ?? overlay;
             EndCustomRun();
             log.LogInfo("BRIDGE_SCENE_EXIT");
         }

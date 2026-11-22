@@ -23,12 +23,9 @@ public sealed partial class Plugin
         private readonly MethodInfo destroy;
         private readonly MethodInfo createFont;
         private readonly MethodInfo openCampaign;
-        private readonly MethodInfo castCampaign;
         private readonly MethodInfo castExtras;
         private readonly MethodInfo findFrontends;
-        private readonly MethodInfo openSaveDialog;
         private readonly Type frontendMenuType;
-        private readonly object oc2Campaign;
         private readonly object extraTrimmings;
         private readonly object keepFont;
         private readonly object middleLeft;
@@ -80,18 +77,14 @@ public sealed partial class Plugin
             Focus = Find(game.GetType("T17EventSystem", throwOnError: true), "SetSelectedGameObject", new[] { GameObject });
             var root = game.GetType("FrontendRootMenu", throwOnError: true);
             frontendMenuType = game.GetType("FrontendRootMenu+FrontendMenuTypeToOpen", throwOnError: true);
-            oc2Campaign = Enum.Parse(frontendMenuType, "OC2Campaign");
             extraTrimmings = Enum.Parse(frontendMenuType, "ExtraTrimmings");
             openCampaign = Find(root, "OpenFrontendMenu", new[] { frontendMenuType, typeof(int), typeof(bool) });
-            var campaign = game.GetType("CampaignMenu", throwOnError: true);
             var nativeObject = interop.GetType("Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase", throwOnError: true);
             var tryCast = nativeObject.GetMethods().Single(method => method.Name == "TryCast" && method.IsGenericMethodDefinition);
-            castCampaign = tryCast.MakeGenericMethod(campaign);
             castExtras = tryCast.MakeGenericMethod(game.GetType("ExtraTrimmingsMenu", throwOnError: true));
             findFrontends = unityObject.GetMethods(BindingFlags.Public | BindingFlags.Static)
                 .Single(method => method.Name == "FindObjectsOfType" && method.IsGenericMethodDefinition && method.GetParameters().Length == 0)
                 .MakeGenericMethod(root);
-            openSaveDialog = Find(campaign, "OnLoadGameClicked", Type.EmptyTypes);
         }
 
         private MethodInfo GenericComponent(string method, Type component) => GameObject.GetMethods()
@@ -143,14 +136,6 @@ public sealed partial class Plugin
         }
 
         internal void ReleaseFont(object font) => destroy.Invoke(null, new[] { font });
-
-        internal void OpenSaveSelection(object root)
-        {
-            var (campaign, index) = FindMenu(root, oc2Campaign, castCampaign);
-            openCampaign.Invoke(root, new[] { oc2Campaign, index, false });
-            openSaveDialog.Invoke(campaign, null);
-            log.LogInfo("BRIDGE_MENU_SAVE_SELECTION campaign=OC2");
-        }
 
         internal void OpenExtraContent(object main)
         {

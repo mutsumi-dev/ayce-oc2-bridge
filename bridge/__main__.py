@@ -7,8 +7,13 @@ import re
 import sys
 from zipfile import BadZipFile
 
+from .addressables import native_recipe_locations
 from .assets import Bundles, ImportErrorDetail, load_bundles, scene_data, xyz
+from .batches import migration_batches
+from .inventory import catalog_recipe_paths, inspect_corpus
 from .kitchen import kevin2_layout
+from .static_layout import prepare_static_batch
+from .stock_batch import create_stock_batch
 
 
 TEMPLATE_RECIPE_ASSETS = {
@@ -56,10 +61,12 @@ def dependency_assets(paths):
     return dict(found.values())
 
 
-def inspect(path, dependencies, selected_scene=None, include_layout=False):
+def inspect(path, dependencies, selected_scene=None, include_layout=False, *, loaded_dependencies=None, include_recipe_graph=False):
     files, ignored = load_bundles(path)
     names = {name.lower(): name for name in files}
-    bundles = Bundles(files, dependency_assets(dependencies))
+    if loaded_dependencies is None:
+        loaded_dependencies = dependency_assets(dependencies)
+    bundles = Bundles(files, loaded_dependencies)
     report = {'format': 'oc2diy-inspection/1', 'input': Path(path).name, 'ignored_executables': ignored, 'sets': []}
     for file in files:
         if not file.lower().startswith('info_'):
@@ -86,7 +93,10 @@ def inspect(path, dependencies, selected_scene=None, include_layout=False):
                     config = by_key.get((player.assets_file.name, player.path_id)) if player is not None else None
                     if config is not None:
                         item['players'][str(count)] = {k: v for k, v in config.tree.items() if k in ('roundTime', 'orderLifeTime', 'timeBetweenOrders', 'plateReturnTime', 'survivalTimeMultiplier') or k.endswith('StarScore')}
-                item['recipes'] = [bundles.recipe(level, p) for p in ld.get('recipes', []) if p.get('m_PathID')]
+                recipe_pointers = [p for p in ld.get('recipes', []) if p.get('m_PathID')]
+                item['recipes'] = [bundles.recipe(level, p) for p in recipe_pointers]
+                if include_recipe_graph:
+                    item['recipeGraph'] = bundles.recipe_graph(level, recipe_pointers)
                 scene_file = names.get(scene.lower()) or names.get(scene.lower() + '.bundle')
                 item['scene_bundle'] = scene_file
                 item.update(scene_data(bundles, scene_file, include_layout=include_layout) if scene_file else {'stations': [], 'mechanics': []})
@@ -228,6 +238,11 @@ def convert(source_path, dependencies, mapping, profile, allow_partial):
     if len(owned) != 1 or not owned[0][1]['scene_bundle']:
         raise ImportErrorDetail('Select exactly one source level with a scene bundle')
     source, level = owned[0]
+    return convert_level(report['input'], source, level, mapping, profile, allow_partial)
+
+
+def convert_level(input_name, source, level, mapping, profile, allow_partial):
+    want_layout = mapping.get('kitchenLayout') is True
     offset = xyz(dict(zip('xyz', mapping.get('offset', [0, 0, 0]), strict=True)))
     applied, moves = set(), []
     for row in mapping.get('stationMap', []):
@@ -252,7 +267,7 @@ def convert(source_path, dependencies, mapping, profile, allow_partial):
                 'playerSettings': level['players'], 'levelGeometry': 'AYCE template geometry retained'}
     if not allow_partial:
         raise ImportErrorDetail('Overlay retains AYCE geometry and player settings. Review inspection and pass --allow-partial to export it.')
-    provenance = {'input': report['input'], 'author': source.get('author'), 'sourceVersion': source.get('version'), 'sourceScene': level['sceneName']}
+    provenance = {'input': input_name, 'author': source.get('author'), 'sourceVersion': source.get('version'), 'sourceScene': level['sceneName']}
     result = package(profile, level.get('levelNameZH') or level['levelName'], moves, dict.fromkeys(recipes.values()), provenance)
     if mapping.get('customEntry'):
         if profile['scene'] != 's_city_h2' or not recipes:
@@ -282,7 +297,32 @@ def main(argv=None):
     read.add_argument('--dependency', action='append', default=[])
     read.add_argument('--scene')
     read.add_argument('--layout', action='store_true', help='include resolved prefab placements and authored box colliders')
+    read.add_argument('--recipe-graph', action='store_true', help='include reusable ingredients, cooked or mixed subrecipes and other referenced resources')
     read.add_argument('--out', required=True)
+    inventory = commands.add_parser('inventory', help='assess each level in a collection of OC2DIYLevel ZIPs')
+    inventory.add_argument('inputs', nargs='+', help='ZIPs or directories that contain ZIPs')
+    inventory.add_argument('--dependency', action='append', default=[])
+    inventory.add_argument('--profile', required=True, help='AYCE Kevin 2 target profile generated with --layout')
+    inventory.add_argument('--ayce-catalog', help='local AYCE Addressables catalog.json for exact stock recipe matches')
+    inventory.add_argument('--export-previews', help='directory for layouts the bridge can currently export')
+    inventory.add_argument('--out', required=True)
+    batches = commands.add_parser('batches', help='group inventoried levels by shared migration requirements')
+    batches.add_argument('inventory', help='inventory JSON generated with --ayce-catalog')
+    batches.add_argument('--out', required=True)
+    prepare = commands.add_parser('prepare-static', help='extract static kitchen and native recipe inputs for a whole batch')
+    prepare.add_argument('batches', help='migration report generated by the batches command')
+    prepare.add_argument('archive_directory')
+    prepare.add_argument('--dependency', action='append', default=[])
+    prepare.add_argument('--ayce-catalog', required=True)
+    prepare.add_argument('--out', required=True)
+    stock = commands.add_parser('pack-static', help='build the playable test package from prepared static inputs')
+    stock.add_argument('game')
+    stock.add_argument('inputs')
+    stock.add_argument('--profile', required=True)
+    stock.add_argument('--stations', required=True)
+    stock.add_argument('--archives', help='directory containing original community scene ZIPs for art export')
+    stock.add_argument('--dependency', action='append', default=[], help='original OC2DIYLevel shared data needed by scene art')
+    stock.add_argument('--out', required=True, help='directory for the new test package')
     scan = commands.add_parser('target', help='inspect one AYCE scene in a local Steam install')
     scan.add_argument('game')
     scan.add_argument('scene')
@@ -303,7 +343,55 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.command == 'inspect':
-            data = inspect(args.input, args.dependency, args.scene, include_layout=args.layout)
+            data = inspect(args.input, args.dependency, args.scene, include_layout=args.layout, include_recipe_graph=args.recipe_graph)
+        elif args.command == 'batches':
+            if Path(args.inventory).resolve() == Path(args.out).resolve():
+                raise ImportErrorDetail('Batch output must not overwrite its inventory')
+            data = migration_batches(read_json(args.inventory))
+        elif args.command == 'prepare-static':
+            output = Path(args.out).resolve()
+            if output.suffix.lower() != '.json' or output in {Path(path).resolve() for path in (args.batches, args.ayce_catalog, *args.dependency)}:
+                raise ImportErrorDetail('Static batch output must be a separate JSON file')
+            bundles = dependency_assets(args.dependency)
+
+            def read_source(path):
+                return inspect(path, (), include_layout=True, loaded_dependencies=bundles)
+
+            data = prepare_static_batch(read_json(args.batches), args.archive_directory, read_source,
+                                        native_recipe_locations(read_json(args.ayce_catalog)), campaign_rules)
+        elif args.command == 'pack-static':
+            destination = Path(args.out).resolve()
+            game = Path(args.game).resolve(strict=True)
+            if destination.is_relative_to(game):
+                raise ImportErrorDetail('Generate the package outside the installed game directory')
+            archives = Path(args.archives) if args.archives else None
+            result = create_stock_batch(game, read_json(args.inputs), read_json(args.profile), read_json(args.stations), destination,
+                                        archives, dependency_assets(args.dependency) if archives else None)
+            write_json(destination / 'manifest.json', result)
+            return
+        elif args.command == 'inventory':
+            sources = [args.profile, *args.dependency]
+            if args.ayce_catalog:
+                sources.append(args.ayce_catalog)
+            if Path(args.out).resolve() in {Path(path).resolve() for path in sources}:
+                raise ImportErrorDetail('Inventory output must not overwrite a profile, catalog or dependency')
+            profile = read_json(args.profile)
+            if profile.get('format') != 'ayce-target/1' or profile.get('scene') != 's_city_h2' or not profile.get('layout'):
+                raise ImportErrorDetail('Inventory requires an AYCE Kevin 2 target profile generated with --layout')
+            bundles = dependency_assets(args.dependency)
+
+            def read_archive(path):
+                return inspect(path, (), include_layout=True, loaded_dependencies=bundles)
+
+            def compile_preview(filename, level_set, level):
+                mapping = {'matchRecipes': True, 'customEntry': True, 'kitchenLayout': True}
+                manifest, _ = convert_level(filename, level_set, level, mapping, profile, allow_partial=True)
+                return manifest
+
+            catalog_paths = catalog_recipe_paths(read_json(args.ayce_catalog)) if args.ayce_catalog else {}
+            data = inspect_corpus(args.inputs, args.out, read_archive, profile,
+                                  TEMPLATE_RECIPE_ASSETS['s_city_h2'], campaign_rules, catalog_paths,
+                                  args.export_previews, compile_preview)
         elif args.command == 'target':
             data = target(args.game, args.scene, include_layout=args.layout, dependencies=args.dependency)
         elif args.command == 'demo':

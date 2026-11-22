@@ -1,8 +1,8 @@
 # AYCE OC2 Bridge
 
-第一阶段开发版支持读取 OC2DIYLevel 发布包，并转换已支持的关卡与菜谱数据。Windows x64 Steam AYCE Build `22894075` 上，OC2 剧情 `1-1`（`s_sushi_1_1`）支持静态台面移位和菜谱覆盖。`DTsimple 7.1` 第 4 关可以生成独立 F8 入口的布局预览，以剧情凯文 2 的原生厨具实现源碰撞、摆放和出生点。社区包中新菜谱的元数据可先导出到兼容报告。
+第一阶段开发版支持读取 OC2DIYLevel 发布包，并转换已支持的关卡与菜谱数据。Windows x64 Steam AYCE Build `22894075` 上，OC2 剧情 `1-1`（`s_sushi_1_1`）支持静态台面移位和菜谱覆盖。`DTsimple 7.1` 第 4 关可从 **战役模式 → 配菜关卡 → 自定义关卡** 独立开局，使用剧情凯文 2 的原生厨具重建源布局、碰撞和出生点。其他社区包可先导出兼容报告。
 
-应用覆盖要求 Steam 离线模式。测试时使用空存档或专用存档，因为进入的是游戏自带关卡，结算可能记录该存档的原版关卡进度。观察模式记录日志，适合先确认加载器、场景与游戏订单回调。
+应用覆盖要求 Steam 离线模式。从剧情地图测试覆盖时，使用空存档或专用存档，因为结算可能记录该存档的原版关卡进度。从自定义关卡菜单启动则使用无存档槽的临时会话。观察模式可用于确认加载器、场景与游戏订单回调。
 
 ## 游戏内首测
 
@@ -68,9 +68,9 @@ Select-String -LiteralPath "$game\BepInEx\LogOutput.log" -Pattern 'BRIDGE_' -Con
 
 ### 额外内容中的自定义关卡
 
-用上述布局覆盖启动游戏后，进入 **战役模式 → 配菜关卡 → 自定义关卡**。列表包含当前布局以及 `BepInEx/plugins/AyceOc2Bridge/levels` 中通过检查的布局 JSON。选关后打开游戏原有的 OC2 存档选择器。使用已解锁凯文 2 的存档继续，桥接会在故事地图和原生加载流程就绪后自动开局。从菜单开局、完成并离开结算画面后，桥接会返回自定义关卡列表。F8 调试入口继续使用故事地图的返回流程。
+用上述布局覆盖启动游戏后，进入 **战役模式 → 配菜关卡 → 自定义关卡**。列表包含当前布局以及 `BepInEx/plugins/AyceOc2Bridge/levels` 中通过检查的布局 JSON。Steam 离线模式下点选关卡即可从菜单直接开局。插件创建无存档槽的临时本机会话。完成并离开结算画面后会返回自定义列表，按关卡、版本和本地人数分别显示最高分与星数。成绩保存在 `BepInEx/config/ayce-oc2-bridge-scores.json`。F8 调试入口继续使用故事地图。
 
-实机验收关注 `BRIDGE_MENU_OPEN`、`BRIDGE_MENU_SAVE_SELECTION`、`BRIDGE_MAP_LOAD_ROUTINE` 和 `BRIDGE_CUSTOM_LAUNCH … entry=menu`。逐个关卡的导入错误记录为 `BRIDGE_MENU_LEVEL_REJECTED`。重新打开「配菜关卡」时，列表会读取磁盘上的关卡包。
+实机验收关注 `BRIDGE_STANDALONE_LAUNCH`、`BRIDGE_KITCHEN_APPLIED`、`BRIDGE_LOCAL_SCORE` 和 `BRIDGE_MENU_RETURN_COMPLETE`。逐个关卡的导入错误记录为 `BRIDGE_MENU_LEVEL_REJECTED`。重新打开「配菜关卡」时，列表会读取磁盘上的关卡包。
 
 ## 检查和转换自己的社区包
 
@@ -99,6 +99,45 @@ New-Item -ItemType Directory -Path local -Force | Out-Null
 ```
 
 在 `inspect` 上使用 `--layout` 可导出源场景的预制件摆放和地面、墙体碰撞盒。在 `target` 上使用相同选项可列出 AYCE 场景中的原生厨具和它们的组件、坐标及动态父级。`target --dependency` 可读取额外的本地 AYCE 资源包，解析食材箱等对象的外部引用。上述布局预览使用这两份清单生成适用于当前模板的覆盖。
+
+### 批量检查发布包
+
+`inventory` 接收一个或多个 ZIP，也可以读取目录下的 ZIP。以包含布局信息的凯文 2 配置为模板，报告逐关列出场景数据、厨具、菜谱和当前的转换限制。若提供本机 AYCE 的 `catalog.json`，报告还会标出原版菜谱路径的精确匹配。这些匹配可用于选择原生资源，仍需验证游戏中的出单与交付。
+
+```powershell
+$catalog = Join-Path $game 'Overcooked All You Can Eat_Data\StreamingAssets\aa\Windows\catalog.json'
+.\.venv\Scripts\python.exe -m bridge inventory 'C:\maps\community' --dependency 'C:\maps\OC2DIYLevel-v0.11.1.zip' --profile local\target-city-h2-layout.json --ayce-catalog $catalog --out local\community-inventory.json
+```
+
+`preview-exportable` 表示通过当前布局、菜谱和规则导出检查。关卡原包中的未迁移内容列在 `omittedFromPreview`。实际场景载入、交互和结算仍以游戏内测试为准。
+
+加上 `--export-previews local\level-previews` 可在本地生成通过检查的布局 JSON。重复执行会复用内容相同的预览文件。如果同名文件内容不同，报告会在该关的 `previewExportError` 中记录冲突。已验证的布局可复制到 `BepInEx/plugins/AyceOc2Bridge/levels`，重新打开配菜关卡后即可在列表里看到。
+
+对带有 AYCE 菜谱目录的清单运行 `batches`，即可按共用的转换条件生成工作批次。每张关卡只进入一个主批次，机关、缺失素材和菜谱引用可同时记录多个问题。`stock-recipes-static-layout` 表示现有扫描找到了所需的原版菜谱及基本静态厨房数据。导出和实机结果仍需分别验收。
+
+```powershell
+.\.venv\Scripts\python.exe -m bridge batches local\community-inventory.json --out local\migration-batches.json
+```
+
+`inspect --recipe-graph` 会按原资源引用导出自定义菜谱的原料、子菜谱、加工步骤和图标依赖。多道菜共用的节点在同一关中只导出一次；缺失节点保留原引用，便于整批核对源库。
+
+`prepare-static` 按发布包和关卡集版本重新读取静态批次，提取原生菜谱地址、每人数规则、厨具摆放和碰撞盒。使用本机完整的 AYCE `catalog.json`，以核对每道菜的原生类型和运行时地址。输出供后续的 AYCE 场景适配器读取，游戏内加载使用 `inventory --export-previews` 生成的布局 JSON。
+
+```powershell
+.\.venv\Scripts\python.exe -m bridge prepare-static local\migration-batches.json 'C:\maps\community' --dependency 'C:\maps\OC2DIYLevel-v0.11.1.zip' --ayce-catalog $catalog --out local\static-layout-inputs.json
+```
+
+### 首批静态关卡测试
+
+`pack-static` 用同一套厨具映射生成游戏可加载的静态关卡，并从当前 AYCE 安装生成禁用所有根对象的本地厨具供体。`Install-StaticBatch.ps1` 校验并安装清单里的关卡和供体。构建好的插件 DLL 放到测试包根目录，供体资源随本机游戏版本生成并留在本地。
+
+```powershell
+.\.venv\Scripts\python.exe -m bridge pack-static $game local\static-layout-inputs.json --profile local\target-city-h2-layout.json --stations examples\ayce-static-stations.json --archives 'C:\maps\community' --dependency 'C:\maps\OC2DIYLevel-v0.11.1.zip' --out release\stock-test
+.\scripts\Build-Bridge.ps1 -BepInExCore 'C:\dependencies\BepInEx\core' -OutputDir .\release\stock-test
+.\scripts\Install-StaticBatch.ps1 -GamePath $game -Package .\release\stock-test -ActiveOverlay .\release\dtsimple-4-layout.json
+```
+
+在 Steam 离线模式下启动游戏，打开 **战役模式 → 配菜关卡 → 自定义关卡**。可先用「暴吵萌厨 1-1」验证取菜、切菜、装盘、交付和结算，再用「星火夜话」验证篝火和烤具。「十二生肖-戌狗」可用于检验同一关里的搅拌、油炸和烤串。物理边界独立于美术渲染，空气墙在游戏中不可见。原发布包提供的静态网格和贴图随关卡导入，装饰引用有匹配时复用本机 AYCE 模型，其余区域使用主题地面。关卡原始光照、动画、美术脚本和未匹配的模型仍需适配。实机运行时可用 `BRIDGE_STOCK_AUTHORED_ART`、`BRIDGE_STOCK_VISUALS` 和 `BRIDGE_LOCAL_SCORE` 核对每关。遇到载入失败时保存包含 `BRIDGE_STOCK_PREPARATION_FAILED` 或 `BRIDGE_KITCHEN_REJECTED` 的日志。
 
 ## 构建
 

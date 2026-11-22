@@ -6,6 +6,7 @@ from zipfile import ZipFile
 
 from bridge.assets import ImportErrorDetail, load_bundles, member_name, rotate
 from bridge.__main__ import by_path, campaign_rules, make_demo, map_recipes, move, package
+from bridge.static_layout import prepare_static_layout
 
 
 CHOP = 'Design/Gameplay Stations/ChoppingBoard_Side 5 (1)'
@@ -76,6 +77,27 @@ class OverlayTests(unittest.TestCase):
         self.profile['scene'] = 's_sushi_1_1'
         with self.assertRaisesRegex(ImportErrorDetail, 'No source recipe asset matches'):
             map_recipes({'recipes': [steamed]}, self.profile, {'matchRecipes': True})
+
+
+class StaticLayoutTests(unittest.TestCase):
+    def test_preserves_water_gun_as_playable_equipment(self):
+        recipe_path = 'Assets/Data/OrderDefinitions/RecipeItems/Pancake.asset'
+        prefab_path = 'Assets/DownloadableContent/DLC02/utensil_water_gun_01.prefab'
+        placements = [
+            {'role': role, 'path': 'Design/' + role, 'prefab': {'assetPath': 'Assets/' + role + '.prefab'}}
+            for role in ('spawn', 'dispenser', 'serving')
+        ]
+        placements.append({'role': None, 'path': 'Design/Utensils/WaterGun', 'stub': 'PseudoPrefabStub',
+                           'prefab': {'assetPath': prefab_path}})
+        level = {
+            'scene_bundle': 'level.bundle', 'mechanics': [],
+            'recipes': [{'name': 'Pancake', 'assetPath': recipe_path, 'score': 60}],
+            'layout': {'placements': placements, 'boxColliders': [{}], 'unresolved': []},
+        }
+        result = prepare_static_layout(level, {recipe_path.casefold(): {'addressKey': recipe_path}}, lambda _: {})
+        self.assertEqual(result['otherPlacements'], [])
+        self.assertEqual(result['kitchenPlacements'][-1]['role'], 'water_gun')
+        self.assertEqual(result['kitchenPlacements'][-1]['prefab']['assetPath'], prefab_path)
 
 
 class CampaignRulesTests(unittest.TestCase):

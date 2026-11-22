@@ -73,3 +73,36 @@ $selection = [OrderFilterTestSelection]::new($prawn)
 $filter.Invoke($null, @($selection)) | Out-Null
 if ($selection.get_Item(0).m_order.name -cne 'Sushi_PlainPrawn') { throw 'The filter affected another scene.' }
 Write-Host 'Selected array replacement, original pool, and scene isolation passed.'
+
+$dto.GetProperty('Kitchen').SetValue($overlay,[Activator]::CreateInstance($assembly.GetType('AyceOc2Bridge.KitchenLayout',$true),$true))
+$type.GetField('sceneHandle',$flags).SetValue($null,123)
+$type.GetField('customRun',$flags).SetValue($null,$true)
+$salad=[OrderFilterTestEntry]::new()
+$salad.m_order=[OrderFilterTestDish]@{name='Salad_Plain'}
+$outside=[OrderFilterTestEntry]::new()
+$outside.m_order=[OrderFilterTestDish]@{name='OutsidePool'}
+$expected=@('Sushi_PlainFish','Sushi_PlainPrawn','Salad_Plain')
+$dto.GetProperty('Recipes').SetValue($overlay,[string[]]$expected)
+$round.m_recipes.m_recipes=@($fish,$prawn,$salad,$outside)
+$type.GetMethod('BeforeRound',$flags).Invoke($null,@($round)) | Out-Null
+$previous=$null
+foreach($cycle in 1..8){
+    $drawn=@(
+        foreach($i in 1..3){
+            $selection=[OrderFilterTestSelection]::new($outside)
+            $filter.Invoke($null,@($selection)) | Out-Null
+            $name=$selection.get_Item(0).m_order.name
+            if($name -notin $expected -or $name -eq $previous){throw 'Invalid custom order draw'}
+            $previous=$name
+            $name
+        }
+    )
+    if(@($drawn|Sort-Object -Unique).Count -ne $expected.Count){throw 'Custom order bag lost an allowed recipe'}
+}
+
+$clamp=$type.GetMethod('KitchenProgressY',$flags)
+foreach($case in @(@(-20,170),@(470,470),@(890,790))){
+    $actual=$clamp.Invoke($null,[object[]]@([single]$case[0],[single]1000))
+    if([math]::Abs($actual-$case[1]) -gt .01){throw 'Progress indicator entered a reserved HUD area.'}
+}
+Write-Host 'Custom order pool coverage, adjacent order separation and HUD progress margins passed.'
