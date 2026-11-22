@@ -16,6 +16,12 @@ public sealed partial class Plugin
     private static MethodInfo selectPortal;
     private static MethodInfo startMapCoroutine;
     private static MethodInfo getGameSession;
+    private static MethodInfo allUsersInMap;
+    private static MethodInfo inviteHandlerReady;
+    private static MethodInfo mapIsPaused;
+    private static MethodInfo anyOpenDialogs;
+    private static object inMap;
+    private static object idleInviteHandler;
     private static PropertyInfo serverTimeLimit;
     private static PropertyInfo clientTimeLimit;
     private static PropertyInfo clientTimerStore;
@@ -29,6 +35,12 @@ public sealed partial class Plugin
     private static bool customRun;
     private static bool customRulesErrorReported;
     private static CampaignRules activeRules;
+    private static Overlay menuLaunchLevel;
+    private static long menuLaunchDeadline;
+    private static long menuLaunchNextAttempt;
+    private static int? menuReadyMap;
+    private static bool menuLoadRoutineSeen;
+    private static string menuWaitReason;
     private static bool CustomLaunchPending => launchExpires != 0 && Environment.TickCount64 < launchExpires;
 
     private static void ValidateCampaignRules(Overlay value)
@@ -66,9 +78,19 @@ public sealed partial class Plugin
         getMapControls = findObjects.MakeGenericMethod(controls);
         selectPortal = Find(flow, "OnSelectLevelPortal", new[] { controls, node });
         startMapCoroutine = Find(flow, "StartCoroutine", new[] { selectPortal.ReturnType });
-        getGameSession = Find(game.GetType("GameUtils", throwOnError: true), "GetGameSession", Type.EmptyTypes);
+        var gameUtils = game.GetType("GameUtils", throwOnError: true);
+        getGameSession = Find(gameUtils, "GetGameSession", Type.EmptyTypes);
+        var state = game.GetType("GameState", throwOnError: true);
+        inMap = Enum.Parse(state, "InMap");
+        allUsersInMap = Find(gameUtils, "AreAllUsersInGameState", new[] { state });
+        var flags = game.GetType("InviteMonitor+StatusFlags", throwOnError: true);
+        idleInviteHandler = Enum.Parse(flags, "HandlerIsValid, HandlerIsIdle");
+        inviteHandlerReady = Find(game.GetType("InviteMonitor", throwOnError: true), "CheckStatus", new[] { flags });
+        anyOpenDialogs = Find(game.GetType("T17DialogBoxManager", throwOnError: true), "HasAnyOpenDialogs", Type.EmptyTypes);
+        mapIsPaused = Find(controls, "IsPaused", Type.EmptyTypes);
 
         Hook(harmony, Find(flow, "LateUpdate", Type.EmptyTypes), nameof(AfterWorldMapUpdate), postfix: true);
+        Hook(harmony, Find(flow, "LoadLevel"), nameof(BeforeMapLoadLevel));
         var config = game.GetType("CampaignLevelConfigBase", throwOnError: true);
         Hook(harmony, Find(config, "GetTimeLimit", Type.EmptyTypes), nameof(AfterTimeLimit), postfix: true);
         var serverTimer = game.GetType("ServerRoundTimer", throwOnError: true);
@@ -111,7 +133,25 @@ public sealed partial class Plugin
 
     private static void AfterWorldMapUpdate(object __instance)
     {
-        if (sceneHandle != null || CustomLaunchPending || customInputUnavailable)
+        if (sceneHandle != null || CustomLaunchPending)
+            return;
+        if (AdvanceLevelMenuReturn(__instance))
+            return;
+        if (menuLaunchLevel != null)
+        {
+            var now = Environment.TickCount64;
+            if (now >= menuLaunchDeadline)
+            {
+                log.LogWarning($"BRIDGE_MENU_LAUNCH_TIMED_OUT reason={menuWaitReason ?? "map transition"}");
+                CancelMenuLaunch();
+            }
+            else if (now >= menuLaunchNextAttempt)
+            {
+                menuLaunchNextAttempt = now + 500;
+                TryLaunchFromMap(__instance, menuLaunchLevel, fromMenu: true);
+            }
+        }
+        if (CustomLaunchPending || customInputUnavailable)
             return;
         try
         {
@@ -124,33 +164,117 @@ public sealed partial class Plugin
             log.LogWarning($"BRIDGE_CUSTOM_INPUT_UNAVAILABLE {error}");
             return;
         }
+        CancelMenuLaunch();
+        TryLaunchFromMap(__instance, installedOverlay ?? overlay, fromMenu: false);
+    }
+
+    private static void QueueMenuLaunch(Overlay level)
+    {
+        CancelMenuLaunch();
+        menuLaunchLevel = level;
+        menuLaunchDeadline = Environment.TickCount64 + 300_000;
+        menuLaunchNextAttempt = 0;
+    }
+
+    private static void CancelMenuLaunch()
+    {
+        menuLaunchLevel = null;
+        menuLaunchDeadline = 0;
+        menuLaunchNextAttempt = 0;
+        menuReadyMap = null;
+        menuWaitReason = null;
+    }
+
+    private static void TryLaunchFromMap(object flow, Overlay level, bool fromMenu)
+    {
+        var previous = overlay;
         try
         {
             if ((bool)isSteamLoggedOn.Invoke(null, null))
                 throw new InvalidOperationException("Steam Offline Mode is required.");
-            var map = Handle(SceneOf(__instance));
+            var map = Handle(SceneOf(flow));
             var portals = ((IEnumerable)getPortals.Invoke(null, null)).Cast<object>();
-            var portal = portals.SingleOrDefault(node => MapPortalTargets(node, map, overlay.Scene))
-                ?? throw new InvalidOperationException("The target portal is not available on this world map.");
+            var portal = portals.SingleOrDefault(node => MapPortalTargets(node, map, level.Scene));
+            var controls = ((IEnumerable)getMapControls.Invoke(null, null)).Cast<object>()
+                .SingleOrDefault(control => Handle(SceneOf(control)) == map);
+            if (portal == null || controls == null)
+            {
+                if (fromMenu)
+                {
+                    WaitForMenuMap("portal or controls");
+                    return;
+                }
+                throw new InvalidOperationException("The target portal or local world-map controls are not ready.");
+            }
+            if (fromMenu && !MenuMapIsReady(flow, controls, map))
+                return;
             var controller = Get(portal, "m_worldMapFlowController");
             var unlock = Find(controller.GetType(), "IsLevelUnlocked");
             if (!(bool)unlock.Invoke(controller, new[] { portal }))
                 throw new InvalidOperationException("The target portal is locked in this save.");
-            var controls = ((IEnumerable)getMapControls.Invoke(null, null)).Cast<object>()
-                .SingleOrDefault(control => Handle(SceneOf(control)) == map)
-                ?? throw new InvalidOperationException("Local world-map controls are not ready.");
 
-            var routine = selectPortal.Invoke(__instance, new[] { controls, portal })
+            var routine = selectPortal.Invoke(flow, new[] { controls, portal })
                 ?? throw new InvalidOperationException("The game did not create a level-selection routine.");
+            overlay = level;
+            menuLoadRoutineSeen = false;
+            launchFromLevelMenu = fromMenu;
             launchExpires = Environment.TickCount64 + 45000;
-            startMapCoroutine.Invoke(__instance, new[] { routine });
-            log.LogInfo($"BRIDGE_CUSTOM_LAUNCH kitchen={overlay.Name} scene={overlay.Scene}");
+            startMapCoroutine.Invoke(flow, new[] { routine });
+            if (fromMenu && !menuLoadRoutineSeen)
+            {
+                overlay = previous;
+                launchExpires = 0;
+                launchFromLevelMenu = false;
+                WaitForMenuMap("native load routine was not reached");
+                return;
+            }
+            CancelMenuLaunch();
+            log.LogInfo($"BRIDGE_CUSTOM_LAUNCH kitchen={level.Name} scene={level.Scene} entry={(fromMenu ? "menu" : "F8")}");
         }
         catch (Exception error)
         {
+            CancelMenuLaunch();
+            overlay = previous;
             launchExpires = 0;
+            launchFromLevelMenu = false;
             log.LogWarning($"BRIDGE_CUSTOM_LAUNCH_REJECTED {error}");
         }
+    }
+
+    private static bool MenuMapIsReady(object flow, object controls, int handle)
+    {
+        if (!(bool)allUsersInMap.Invoke(null, new[] { inMap }))
+            return WaitForMenuMap("map state");
+        if (Get(flow, "m_runIntro") != null || (bool)anyOpenDialogs.Invoke(null, null) || (bool)mapIsPaused.Invoke(controls, null))
+            return WaitForMenuMap("map intro or dialog");
+        if (!(bool)inviteHandlerReady.Invoke(null, new[] { idleInviteHandler }))
+            return WaitForMenuMap("native invite handler");
+        if (menuReadyMap != handle)
+        {
+            menuReadyMap = handle;
+            return false;
+        }
+        return true;
+    }
+
+    private static bool WaitForMenuMap(string reason)
+    {
+        menuReadyMap = null;
+        if (reason != menuWaitReason)
+        {
+            menuWaitReason = reason;
+            log.LogInfo($"BRIDGE_MENU_WAITING reason={reason}");
+        }
+        return false;
+    }
+
+    private static void BeforeMapLoadLevel(object __2)
+    {
+        if (!CustomLaunchPending)
+            return;
+        var scene = __2 == null ? null : (string)Get(__2, "SceneName");
+        menuLoadRoutineSeen = scene == overlay.Scene;
+        log.LogInfo($"BRIDGE_MAP_LOAD_ROUTINE scene={scene} expected={overlay.Scene}");
     }
 
     private static bool MapPortalTargets(object node, int map, string target)
@@ -167,6 +291,9 @@ public sealed partial class Plugin
     {
         launchExpires = 0;
         customRun = true;
+        customRoundFromMenu = launchFromLevelMenu;
+        launchFromLevelMenu = false;
+        customRoundCompleted = false;
         activeRules = null;
         customRulesErrorReported = false;
         log.LogInfo($"BRIDGE_CUSTOM_ACTIVE kitchen={overlay.Name}");
@@ -307,6 +434,8 @@ public sealed partial class Plugin
     private static void EndCustomRun()
     {
         customRun = false;
+        customRoundFromMenu = false;
+        customRoundCompleted = false;
         activeRules = null;
     }
 }

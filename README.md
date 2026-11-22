@@ -64,7 +64,13 @@ Select-String -LiteralPath "$game\BepInEx\LogOutput.log" -Pattern 'BRIDGE_' -Con
 .\scripts\Install-Bridge.ps1 -GamePath $game -Mode Custom -Overlay '.\release\dtsimple-4-layout.json'
 ```
 
-先检查四个食材箱和三台搅拌机。用第三台搅拌机完成一次混合，将点心蒸熟、装盘、交付并等到结算。布局安装会留下 `BRIDGE_KITCHEN_APPLIED`。若场景仍是原版凯文 2，离开关卡并检查 `BRIDGE_KITCHEN_REJECTED` 或 `BRIDGE_SCENE_REJECTED` 附近的日志。用 `examples/dtsimple-4-layout.json` 重新转换时，`target --layout` 需用 `--dependency` 提供本机 AYCE 的 `duplicateassetisolation_assets_all.bundle`、`duplicateassetisolation_assets_all1.bundle`、`duplicateassetisolation_assets_all2.bundle` 和 `duplicateassetisolation_assets_all4.bundle`。
+先检查四个食材箱和三台搅拌机。用第三台搅拌机完成一次混合，将点心蒸熟、装盘、交付并等到结算。布局安装会留下 `BRIDGE_KITCHEN_GRID` 和 `BRIDGE_KITCHEN_APPLIED`。若场景仍是原版凯文 2，离开关卡并检查 `BRIDGE_KITCHEN_REJECTED` 或 `BRIDGE_SCENE_REJECTED` 附近的日志。用 `examples/dtsimple-4-layout.json` 重新转换时，`target --layout` 需用 `--dependency` 提供本机 AYCE 的 `duplicateassetisolation_assets_all.bundle`、`duplicateassetisolation_assets_all1.bundle`、`duplicateassetisolation_assets_all2.bundle` 和 `duplicateassetisolation_assets_all4.bundle`。
+
+### 额外内容中的自定义关卡
+
+用上述布局覆盖启动游戏后，进入 **战役模式 → 配菜关卡 → 自定义关卡**。列表包含当前布局以及 `BepInEx/plugins/AyceOc2Bridge/levels` 中通过检查的布局 JSON。选关后打开游戏原有的 OC2 存档选择器。使用已解锁凯文 2 的存档继续，桥接会在故事地图和原生加载流程就绪后自动开局。从菜单开局、完成并离开结算画面后，桥接会返回自定义关卡列表。F8 调试入口继续使用故事地图的返回流程。
+
+实机验收关注 `BRIDGE_MENU_OPEN`、`BRIDGE_MENU_SAVE_SELECTION`、`BRIDGE_MAP_LOAD_ROUTINE` 和 `BRIDGE_CUSTOM_LAUNCH … entry=menu`。逐个关卡的导入错误记录为 `BRIDGE_MENU_LEVEL_REJECTED`。重新打开「配菜关卡」时，列表会读取磁盘上的关卡包。
 
 ## 检查和转换自己的社区包
 

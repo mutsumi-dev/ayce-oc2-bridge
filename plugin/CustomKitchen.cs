@@ -38,13 +38,20 @@ public sealed partial class Plugin
     private static MethodInfo kitchenCreatePrimitive;
     private static MethodInfo kitchenLevelData;
     private static MethodInfo kitchenGrid;
+    private static MethodInfo kitchenGridLocations;
+    private static MethodInfo kitchenUnclampedCell;
+    private static MethodInfo kitchenClampedCell;
     private static MethodInfo kitchenAttachStation;
+    private static MethodInfo kitchenAttachObject;
     private static MethodInfo kitchenBoxCollider;
     private static MethodInfo kitchenMeshRenderer;
     private static object kitchenCube;
     private static bool applyingKitchen;
     private static int? kitchenHandle;
     private static int? failedKitchenHandle;
+    private static Dictionary<int, KitchenProp> kitchenProps = new();
+
+    private sealed record KitchenProp(string Source, string Support, object Item);
 
     private static void ValidateKitchen(Overlay value)
     {
@@ -124,13 +131,24 @@ public sealed partial class Plugin
 
         var level = game.GetType("LevelData", throwOnError: true);
         kitchenLevelData = GenericGameObjectMethod("GetComponent", level);
-        kitchenGrid = GenericGameObjectMethod("GetComponent", game.GetType("QuadGridManager", throwOnError: true));
+        var grid = game.GetType("QuadGridManager", throwOnError: true);
+        kitchenGrid = GenericGameObjectMethod("GetComponent", grid);
+        var location = game.GetType("StaticGridLocation", throwOnError: true);
+        kitchenGridLocations = kitchenObjectType.GetMethods()
+            .Single(method => method.Name == "GetComponentsInChildren" && method.IsGenericMethodDefinition &&
+                              method.GetParameters() is var args && args.Length == 1 && args[0].ParameterType == typeof(bool))
+            .MakeGenericMethod(location);
+        kitchenUnclampedCell = Find(grid, "GetUnclampedGridLocationFromPos", new[] { vectorType });
+        kitchenClampedCell = Find(grid, "GetGridLocationFromPos", new[] { vectorType });
         kitchenAttachStation = GenericGameObjectMethod("GetComponent", game.GetType("AttachStation", throwOnError: true));
+        var serverAttach = game.GetType("ServerAttachStation", throwOnError: true);
+        kitchenAttachObject = Find(serverAttach, "AttachObject", new[] { kitchenObjectType, game.GetType("PlacementContext", throwOnError: true) });
         kitchenMeshRenderer = GenericGameObjectMethod("GetComponent", unity.GetType("UnityEngine.MeshRenderer", throwOnError: true));
         var physics = Assembly.Load("UnityEngine.PhysicsModule");
         kitchenBoxCollider = GenericGameObjectMethod("GetComponent", physics.GetType("UnityEngine.BoxCollider", throwOnError: true));
         syncPhysics = Find(physics.GetType("UnityEngine.Physics", throwOnError: true), "SyncTransforms", Type.EmptyTypes);
         Hook(harmony, Find(level, "Awake", Type.EmptyTypes), nameof(BeforeLayoutLevelAwake));
+        Hook(harmony, Find(serverAttach, "AttachInitialObjects", Type.EmptyTypes), nameof(BeforeAttachKitchenProps));
     }
 
     private static MethodInfo GenericGameObjectMethod(string name, Type target) => kitchenObjectType.GetMethods()
@@ -243,9 +261,6 @@ public sealed partial class Plugin
                 CreateKitchenCube(roomTransform, "Wall edge", new[] { box.Position[0], -.79f, box.Position[2] }, box.Rotation,
                     new[] { box.Size[0], .42f, box.Size[2] }, 10, collision: false, visible: true);
 
-            var oldGridOrigin = Get(grid, "AccessOrigin");
-            rollback.Push(() => Set(grid, "AccessOrigin", oldGridOrigin));
-            Set(grid, "AccessOrigin", Vector(new[] { 10.8f, 0f, 3.6f }));
             foreach (var move in kitchen.Placements.OrderBy(move => move.Support != null))
             {
                 var transform = resolved[move.Source];
@@ -272,6 +287,8 @@ public sealed partial class Plugin
                 }
                 SetTransform(transform, Vector(position), Rotation(move.Rotation));
             }
+            // The template origin is relative to the grid object's transform. Keep it in native space.
+            ValidateKitchenGrid(grid, kitchen.Placements, resolved);
 
             var serving = kitchen.Placements.Single(move => move.Role == "serving");
             CreateKitchenCube(roomTransform, "Serving surface", new[] { serving.Position[0], serving.Position[1] + .25f, serving.Position[2] },
@@ -284,9 +301,11 @@ public sealed partial class Plugin
                 rollback.Push(() => SetActive(item, oldActive));
                 SetActive(item, false);
             }
+            var authoredProps = ReserveKitchenProps(kitchen, resolved);
             foreach (var move in kitchen.Placements.Where(move => move.Clone))
                 SetActive(Get(resolved[move.Source], "gameObject"), true);
             syncPhysics.Invoke(null, null);
+            kitchenProps = authoredProps;
             log.LogInfo($"BRIDGE_KITCHEN_APPLIED placements={resolved.Count} boxes={kitchen.Boxes.Length} mixerCount=3 " +
                         $"addedEntities={(int)Get(entities, "Count") - entityBaseline.Length} addedComponents={(int)Get(components, "Count") - componentBaseline.Length}");
         }
@@ -307,6 +326,79 @@ public sealed partial class Plugin
             }
             catch (Exception error) { log.LogError($"BRIDGE_KITCHEN_ROLLBACK_ERROR {error}"); }
             throw;
+        }
+    }
+
+    private static void ValidateKitchenGrid(object grid, IEnumerable<KitchenPlacement> placements, Dictionary<string, object> resolved)
+    {
+        var cells = new Dictionary<(int X, int Y, int Z), string>();
+        foreach (var move in placements.Where(move => move.Support == null && move.Role != "spawn"))
+        {
+            var item = Get(resolved[move.Source], "gameObject");
+            var locations = Enumerate(kitchenGridLocations.Invoke(item, new object[] { true }));
+            foreach (var location in locations)
+            {
+                var position = Get(Get(location, "transform"), "position");
+                var expected = GridCell(kitchenUnclampedCell.Invoke(grid, new[] { position }));
+                var actual = GridCell(kitchenClampedCell.Invoke(grid, new[] { position }));
+                if (expected != actual)
+                    throw new InvalidDataException($"Kitchen grid clipped {move.Source} from {expected} to {actual}.");
+                if (!cells.TryAdd(actual, move.Source))
+                    throw new InvalidDataException($"Kitchen grid cell {actual} is shared by {cells[actual]} and {move.Source}.");
+            }
+        }
+        if (cells.Count != 34)
+            throw new InvalidDataException($"Expected 34 native kitchen grid cells; found {cells.Count}.");
+        log.LogInfo($"BRIDGE_KITCHEN_GRID cells={cells.Count} clipped=0 overlaps=0");
+    }
+
+    private static (int X, int Y, int Z) GridCell(object index) => ((int)Get(index, "X"), (int)Get(index, "Y"), (int)Get(index, "Z"));
+
+    private static Dictionary<int, KitchenProp> ReserveKitchenProps(KitchenLayout kitchen, Dictionary<string, object> resolved)
+    {
+        var props = kitchen.Placements.Where(move => move.Support != null).ToLookup(move => move.Support, StringComparer.Ordinal);
+        var planned = new Dictionary<int, KitchenProp>();
+        foreach (var move in kitchen.Placements.Where(move => move.Support == null && move.Role != "spawn"))
+        {
+            var support = Get(resolved[move.Source], "gameObject");
+            var item = props[move.Source].SingleOrDefault();
+            var component = kitchenAttachStation.Invoke(support, null);
+            if (component == null)
+            {
+                if (item != null)
+                    throw new InvalidDataException($"Missing native attach station for {item.Source}.");
+                continue;
+            }
+            planned.Add((int)Call(support, "GetInstanceID"), item == null ? null :
+                new KitchenProp(item.Source, move.Source, Get(resolved[item.Source], "gameObject")));
+        }
+        return planned;
+    }
+
+    private static bool BeforeAttachKitchenProps(object __instance)
+    {
+        if (kitchenHandle == null || kitchenProps.Count == 0)
+            return true;
+        try
+        {
+            var station = Get(Get(__instance, "m_station"), "gameObject");
+            if (!kitchenProps.TryGetValue((int)Call(station, "GetInstanceID"), out var prop))
+                return true;
+            if (prop == null)
+                return false;
+
+            kitchenAttachObject.Invoke(__instance, new[] { prop.Item, null });
+            var placed = Call(__instance, "InspectItem");
+            if (placed != null && (int)Call(placed, "GetInstanceID") == (int)Call(prop.Item, "GetInstanceID"))
+                log.LogInfo($"BRIDGE_KITCHEN_PROP_ATTACHED item={prop.Source} station={prop.Support}");
+            else
+                log.LogWarning($"BRIDGE_KITCHEN_PROP_REJECTED item={prop.Source} station={prop.Support}");
+            return false;
+        }
+        catch (Exception error)
+        {
+            log.LogWarning($"BRIDGE_KITCHEN_PROP_ERROR {error}");
+            return true;
         }
     }
 

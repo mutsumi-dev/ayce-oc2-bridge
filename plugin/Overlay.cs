@@ -14,6 +14,14 @@ internal sealed class Overlay
     [JsonPropertyName("recipeAllowlist")] public string[] Recipes { get; set; }
     [JsonPropertyName("campaignRules")] public Dictionary<string, CampaignRules> CampaignRules { get; set; }
     [JsonPropertyName("kitchen")] public KitchenLayout Kitchen { get; set; }
+    [JsonPropertyName("provenance")] public LevelProvenance Provenance { get; set; }
+}
+
+internal sealed class LevelProvenance
+{
+    [JsonPropertyName("author")] public string Author { get; set; }
+    [JsonPropertyName("sourceScene")] public string Scene { get; set; }
+    [JsonPropertyName("sourceVersion")] public string Version { get; set; }
 }
 
 internal sealed class KitchenLayout

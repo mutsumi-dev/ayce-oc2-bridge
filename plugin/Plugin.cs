@@ -13,7 +13,7 @@ using HarmonyLib;
 
 namespace AyceOc2Bridge;
 
-[BepInPlugin(Id, "AYCE OC2 Bridge", "0.4.0")]
+[BepInPlugin(Id, "AYCE OC2 Bridge", "0.5.3")]
 public sealed partial class Plugin : BasePlugin
 {
     internal const string Id = "dev.ayce.oc2bridge";
@@ -23,6 +23,7 @@ public sealed partial class Plugin : BasePlugin
     private const string KevinScene = "s_city_h2";
     private static ManualLogSource log;
     private static Overlay overlay;
+    private static Overlay installedOverlay;
     private static bool applyOverlay;
     private static string SceneNameToWatch => applyOverlay ? overlay.Scene : SushiScene;
     private static MethodInfo isSteamLoggedOn;
@@ -55,12 +56,7 @@ public sealed partial class Plugin : BasePlugin
             if (!SupportedHash.Equals(currentHash, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException("GameAssembly.dll is from an unsupported AYCE build.");
             if (File.Exists(path))
-            {
-                if (new FileInfo(path).Length > 512 * 1024)
-                    throw new InvalidDataException("active.json exceeds 512 KiB.");
-                overlay = JsonSerializer.Deserialize<Overlay>(File.ReadAllBytes(path));
-                Validate(overlay);
-            }
+                overlay = installedOverlay = ReadOverlay(path);
             applyOverlay = enabled.Value && overlay != null;
 
             var game = Assembly.Load("Assembly-CSharp");
@@ -123,11 +119,23 @@ public sealed partial class Plugin : BasePlugin
                 throw;
             }
             log.LogInfo($"BRIDGE_READY mode={(applyOverlay ? "overlay" : "observe")} build={SupportedBuild} scene={SceneNameToWatch}");
+            if (applyOverlay && installedOverlay.Kitchen != null)
+                TryInstallLevelMenu(game, unity);
         }
         catch (Exception error)
         {
             log.LogError($"BRIDGE_DISABLED {error}");
         }
+    }
+
+    private static Overlay ReadOverlay(string path)
+    {
+        using var file = File.OpenRead(path);
+        if (file.Length > 512 * 1024)
+            throw new InvalidDataException("Overlay exceeds 512 KiB.");
+        var value = JsonSerializer.Deserialize<Overlay>(file);
+        Validate(value);
+        return value;
     }
 
     private static void Validate(Overlay value)
@@ -454,12 +462,17 @@ public sealed partial class Plugin : BasePlugin
         try
         {
             var handle = Handle(SceneOf(__instance));
+            if (failedKitchenHandle == handle || kitchenHandle == handle || sceneHandle == handle)
+                overlay = installedOverlay ?? overlay;
             if (refusedHandle == handle)
                 refusedHandle = null;
             if (failedKitchenHandle == handle)
                 failedKitchenHandle = null;
             if (kitchenHandle == handle)
+            {
                 kitchenHandle = null;
+                kitchenProps.Clear();
+            }
             if (sceneHandle != handle)
                 return;
             allowedOrders = Array.Empty<OrderRecipe>();
@@ -467,6 +480,7 @@ public sealed partial class Plugin : BasePlugin
             worktopHighlights.Clear();
             ReportedWorktops.Clear();
             sceneHandle = null;
+            BeginLevelMenuReturn();
             EndCustomRun();
             log.LogInfo("BRIDGE_SCENE_EXIT");
         }
