@@ -29,6 +29,8 @@ public sealed partial class Plugin
         internal readonly List<object> OwnedArt = new();
         internal readonly List<(KitchenLoop Loop, object Clip)> LoopingAudio = new();
         internal object RoundAudioDirectory;
+        internal object FireRules;
+        internal bool ReportedFireFallback;
         internal readonly Dictionary<string, object> VisualModels = new(StringComparer.Ordinal);
         internal ArtScene Art;
         internal object ArtShader;
@@ -57,6 +59,8 @@ public sealed partial class Plugin
     private static Type stockEntryType;
     private static Type stockBundleResource;
     private static object stockAdditiveMode;
+    private static Type stockFireProfileType;
+    private const string StockFireProfile = "Assets/DownloadableContent/DLC03/DLC_Assets/Data/LevelConfigs/Wonderland_1_1_1P.asset";
 
     private static bool SafeAssetPath(string value, string extension) => value is { Length: > 12 and <= 225 } &&
         value.StartsWith("Assets/", StringComparison.Ordinal) && value.EndsWith(extension, StringComparison.OrdinalIgnoreCase) &&
@@ -69,7 +73,7 @@ public sealed partial class Plugin
             return;
         if (value.Kitchen != null || value.Scene != KevinScene || value.CampaignRules == null || value.Moves.Length != 0 ||
             data.Recipes?.Length is not (> 0 and <= 100) || data.Stations?.Length is not (> 5 and <= 240) ||
-            data.Boxes?.Length is not (> 0 and <= 100) || data.Donors == null || data.Donors.Count > 20)
+            data.Boxes?.Length is not (> 0 and <= 256) || data.Donors == null || data.Donors.Count > 20)
             throw new InvalidDataException("Invalid static kitchen manifest.");
 
         var recipeKeys = new HashSet<string>(StringComparer.Ordinal);
@@ -98,9 +102,28 @@ public sealed partial class Plugin
                 !(station.Scene == "asset" ? SafeAssetPath(station.Path, ".prefab") :
                     (station.Scene == KevinScene || data.Donors.ContainsKey(station.Scene)) && LayoutPath(station.Path)) ||
                 !ValidVector(station.Position, 3) || station.Position.Any(n => Math.Abs(n) > 48f) || !LayoutRotation(station.Rotation) ||
-                (station.Role == "dispenser" ? !SafeAssetPath(station.Ingredient, ".prefab") : station.Ingredient != null) ||
+                (station.Role is "dispenser" or "ingredient_spray"
+                    ? !SafeAssetPath(station.Ingredient, ".prefab") : station.Ingredient != null) ||
                 station.ReturnStack != null && (station.Role is not ("plate_return" or "glass_return" or "plate_supply") || !SafeAssetPath(station.ReturnStack, ".prefab")) ||
                 station.ReturnStations != null && (station.Role != "serving" || station.ReturnStations.Length > data.Stations.Length) ||
+                (station.Role == "teleportal" ? station.PortalExit == null || station.Scene == "asset" || station.Support != null
+                                             : station.PortalExit != null || station.PortalDoubleSided) ||
+                (station.Role is "conveyor" or "travelator"
+                    ? station.MotionSpeed is not (>= -20f and <= 20f) || station.Scene == "asset" || station.Support != null
+                    : station.MotionSpeed != null) ||
+                (station.Role == "attached_spawner") != (station.AttachedSpawn != null) ||
+                station.AttachedSpawn is StockAttachedSpawn feed && (station.Scene == "asset" || station.Support != null ||
+                    feed.Items?.Length is not (> 0 and <= 32) || feed.Items.Any(key => !SafeAssetPath(key, ".prefab")) ||
+                    feed.Weights?.Length != feed.Items.Length || feed.Weights.Any(weight => !float.IsFinite(weight) || weight <= 0) ||
+                    feed.Seconds is not (>= .1f and <= 300f) || feed.Target == null) ||
+                (station.Role == "condiment_dispenser") != (station.CondimentItems != null) ||
+                station.CondimentItems != null && (station.Scene == "asset" || station.Support != null ||
+                    station.CondimentItems.Length != 2 || station.CondimentItems.Any(key => !SafeAssetPath(key, ".asset")) ||
+                    station.CondimentItems[0] == station.CondimentItems[1]) ||
+                (station.Role == "condiment_switch") != (station.CondimentTargets != null) ||
+                station.CondimentTargets != null && (station.Scene == "asset" || station.Support != null ||
+                    station.CondimentTargets.Length is not (> 0 and <= 8) ||
+                    station.CondimentTargets.Distinct(StringComparer.Ordinal).Count() != station.CondimentTargets.Length) ||
                 station.AllowedIngredients?.Any(key => !SafeAssetPath(key, ".asset") && !SafeAssetPath(key, ".prefab")) == true ||
                 station.AllowedCookingStationTypes?.Any(type => type is < 1 or > 7) == true ||
                 station.Role == "plate_supply" && (station.Support != null || station.ReturnStack == null || station.PlateCount <= 0) ||
@@ -122,6 +145,18 @@ public sealed partial class Plugin
             if (station.ReturnStations.Any(id => id == null || !stationIds.TryGetValue(id, out var target) ||
                 target.Role is not ("plate_return" or "glass_return")))
                 throw new InvalidDataException($"Invalid vessel return link for {station.Id}.");
+        foreach (var station in data.Stations.Where(station => station.PortalExit != null))
+            if (!stationIds.TryGetValue(station.PortalExit, out var target) || target == station || target.Role != "teleportal")
+                throw new InvalidDataException($"Invalid portal destination for {station.Id}.");
+        foreach (var station in data.Stations.Where(station => station.AttachedSpawn != null))
+            if (!stationIds.TryGetValue(station.AttachedSpawn.Target, out var target) || target.Role != "conveyor")
+                throw new InvalidDataException($"Invalid automatic food source destination for {station.Id}.");
+        foreach (var station in data.Stations.Where(station => station.CondimentTargets != null))
+            if (station.CondimentTargets.Any(id => id == null || !stationIds.TryGetValue(id, out var target) || target.Role != "condiment_dispenser"))
+                throw new InvalidDataException($"Invalid condiment switch destination for {station.Id}.");
+        if (!data.Stations.Where(row => row.CondimentTargets != null).SelectMany(row => row.CondimentTargets).ToHashSet()
+                .SetEquals(data.Stations.Where(row => row.CondimentItems != null).Select(row => row.Id)))
+            throw new InvalidDataException("Missing condiment dispenser switch.");
         if (!data.Boxes.Any(box => box?.Layer == 9) || data.Boxes.Any(box => box == null || box.Layer is not (0 or 9 or 10) ||
                 !ValidVector(box.Position, 3) || !ValidVector(box.Size, 3) || box.Size.Any(n => n is <= 0 or > 100) || !LayoutRotation(box.Rotation)))
             throw new InvalidDataException("Invalid authored collision boxes for a static kitchen.");
@@ -161,6 +196,10 @@ public sealed partial class Plugin
             TryInstallStockArt(unity);
             var gameUtils = game.GetType("GameUtils", true);
             stockGetLevelConfig = Find(gameUtils, "GetLevelConfig", Type.EmptyTypes);
+            stockFireProfileType = game.GetType("ScriptedCampaignLevelConfig", true);
+            var flammable = game.GetType("ServerFlammable", true);
+            Hook(harmony, Find(flammable, "Awake", Type.EmptyTypes), nameof(EnsureStockFireRules), postfix: true);
+            Hook(harmony, Find(flammable, "EncourageFire", new[] { flammable }), nameof(EnsureStockFireRules));
             stockMatchListType = game.GetType("RecipeMatchList", true);
             stockCookingStepType = game.GetType("CookingStepData", true);
             stockCreateMatchList = kitchenNewLookup.GetGenericMethodDefinition().MakeGenericMethod(stockMatchListType);
@@ -185,6 +224,20 @@ public sealed partial class Plugin
         var handle = method.Invoke(null, new[] { argument }) ?? throw new InvalidOperationException($"No resource handle for {key}.");
         state.Handles.Add(handle);
         return handle;
+    }
+
+    private static void EnsureStockFireRules(object __instance)
+    {
+        if (stockLoad?.FireRules == null || overlay?.Stock == null || (!applyingKitchen && kitchenHandle == null))
+            return;
+        if (Get(__instance, "m_fireConfigData") != null)
+            return;
+        Set(__instance, "m_fireConfigData", stockLoad.FireRules);
+        if (!stockLoad.ReportedFireFallback)
+        {
+            stockLoad.ReportedFireFallback = true;
+            log.LogInfo("BRIDGE_STOCK_FIRE_FALLBACK native campaign rules installed");
+        }
     }
 
     private static object ReadAddressable(object handle, string key)
@@ -215,10 +268,19 @@ public sealed partial class Plugin
 
         foreach (var step in PrepareStockAudio(state, kitchen))
             yield return step;
+        var fireTask = StartAddressable(state, stockFireProfileType, StockFireProfile);
+        while (!(bool)Get(fireTask, "IsDone")) yield return null;
+        var hazards = Call(ReadAddressable(fireTask, StockFireProfile), "getHazardInfo");
+        state.FireRules = hazards == null ? null : Call(hazards, "getFireConfig");
+        if (state.FireRules == null)
+            throw new InvalidDataException("The native campaign fire rules are missing.");
         var approvals = kitchen.Stations.SelectMany(station => station.AllowedIngredients ?? Array.Empty<string>())
             .Distinct(StringComparer.Ordinal).ToArray();
-        var items = kitchen.Stations.Select(station => station.Ingredient ?? station.ReturnStack ?? (station.Scene == "asset" ? station.Path : null))
-            .Where(key => key != null).Concat(approvals.Where(key => SafeAssetPath(key, ".prefab")))
+        var dispensedKeys = kitchen.Stations.SelectMany(station => station.AttachedSpawn?.Items ??
+                (station.Ingredient == null ? Array.Empty<string>() : new[] { station.Ingredient }))
+            .Distinct(StringComparer.Ordinal).ToArray();
+        var items = kitchen.Stations.Select(station => station.ReturnStack ?? (station.Scene == "asset" ? station.Path : null))
+            .Where(key => key != null).Concat(dispensedKeys).Concat(approvals.Where(key => SafeAssetPath(key, ".prefab")))
             .Distinct(StringComparer.Ordinal).ToArray();
         var itemTasks = items.Select(key => (Key: key, Handle: StartAddressable(state, kitchenObjectType, key))).ToArray();
         foreach (var task in itemTasks)
@@ -227,6 +289,8 @@ public sealed partial class Plugin
             state.Ingredients.Add(task.Key, ReadAddressable(task.Handle, task.Key));
         }
         var ingredientTasks = approvals.Where(key => SafeAssetPath(key, ".asset"))
+            .Concat(kitchen.Stations.SelectMany(row => row.CondimentItems ?? Array.Empty<string>()))
+            .Distinct(StringComparer.Ordinal)
             .Select(key => (Key: key, Handle: StartAddressable(state, stockOrderType, key))).ToArray();
         foreach (var task in ingredientTasks)
         {
@@ -250,8 +314,7 @@ public sealed partial class Plugin
         }
         if (state.Orders.Count == 0)
             throw new InvalidDataException("No native order definitions were loaded.");
-        var dispensed = kitchen.Stations.Where(row => row.Ingredient != null).Select(row => row.Ingredient).Distinct(StringComparer.Ordinal)
-            .Select(key => StockIngredientDefinition(state.Ingredients[key]));
+        var dispensed = dispensedKeys.Select(key => StockIngredientDefinition(state.Ingredients[key]));
         var trayNodes = StockTrayOrderNodes(state, kitchen).DistinctBy(node => (int)Get(node, "m_uID")).ToArray();
         if (trayNodes.Length != 0)
             log.LogInfo($"BRIDGE_STOCK_TRAY_RECIPES {string.Join(", ", trayNodes.Select(node => Get(node, "name")))}");

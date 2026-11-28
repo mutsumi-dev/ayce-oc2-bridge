@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -227,7 +228,10 @@ public sealed partial class Plugin
                 var author = level.Overlay.Provenance?.Author;
                 var release = level.Overlay.Provenance?.Version;
                 scores.TryGetValue(ScoreKey(level.Overlay, localPlayers), out var best);
-                var result = best == null ? "尚无成绩" : $"{localPlayers} 人最高 {best.Points} 分 · {best.Stars} 星";
+                var rules = level.Overlay.CampaignRules;
+                var result = rules.Count < 4 && !rules.ContainsKey(localPlayers.ToString(CultureInfo.InvariantCulture))
+                    ? PlayerCountsLabel(rules)
+                    : best == null ? "尚无成绩" : $"{localPlayers} 人最高 {best.Points} 分 · {best.Stars} 星";
                 var details = string.Join("  ·  ", new[] { author, release, result }.Where(value => !string.IsNullOrWhiteSpace(value)));
                 var label = $"{Limit(level.Overlay.Name, 52)}\n{Limit(details, 90)}";
                 var top = .735f - index * .102f;
@@ -247,6 +251,9 @@ public sealed partial class Plugin
 
         private static string Limit(string value, int max) => value.Length <= max ? value : value[..(max - 1)] + "…";
 
+        private static string PlayerCountsLabel(Dictionary<string, CampaignRules> rules) =>
+            $"支持 {string.Join(" / ", rules.Keys.OrderBy(count => count, StringComparer.Ordinal))} 人";
+
         private object AddButton(object parent, string title, float left, float bottom, float right, float top,
             Action action, bool inCatalog = true)
         {
@@ -258,13 +265,25 @@ public sealed partial class Plugin
 
         private void SelectLevel(LocalLevel level)
         {
+            if (standaloneRequest is { } request)
+            {
+                ShowStatus($"正在载入《{request.Level.Name}》…");
+                return;
+            }
             if ((bool)isSteamLoggedOn.Invoke(null, null))
             {
                 Set(status, "text", "请将 Steam 切换为离线模式，再选择关卡。");
                 return;
             }
-            BeginStandaloneLevel(level.Overlay);
-            ShowStatus("正在准备本地厨房…");
+            var rules = level.Overlay.CampaignRules;
+            if (!rules.ContainsKey(LocalPlayerCount().ToString(CultureInfo.InvariantCulture)))
+            {
+                ShowStatus($"此关卡{PlayerCountsLabel(rules)}。");
+                return;
+            }
+            if (!BeginStandaloneLevel(level.Overlay))
+                return;
+            ShowStatus($"正在载入《{level.Overlay.Name}》…");
             log.LogInfo($"BRIDGE_MENU_SELECTED kitchen={level.Overlay.Name} path={level.Path}");
         }
 

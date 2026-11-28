@@ -42,8 +42,9 @@ public sealed partial class Plugin
         var rules = value.CampaignRules;
         if (rules == null)
             return;
-        if (value.Scene != KevinScene || value.Recipes.Length == 0 || !rules.ContainsKey("1") || rules.Count > 4)
-            throw new InvalidDataException("Custom campaign requires an imported Kevin 2 menu and solo rules.");
+        if (value.Scene != KevinScene || value.Recipes.Length == 0 || rules.Count is < 1 or > 4 ||
+            (value.Stock == null && !rules.ContainsKey("1")))
+            throw new InvalidDataException("Custom campaign requires an imported Kevin 2 menu and supported player rules.");
         foreach (var (count, player) in rules)
         {
             if (count is not ("1" or "2" or "3" or "4") || player == null ||

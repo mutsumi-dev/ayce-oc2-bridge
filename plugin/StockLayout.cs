@@ -13,16 +13,23 @@ public sealed partial class Plugin
         "spawn", "counter", "chopping", "dispenser", "serving", "sink", "trash", "plate_return", "plate_stack",
         "plate", "plate_supply", "extinguisher", "water_gun", "stove", "mixer", "mixing_bowl", "steamer", "barbecue", "bellows", "blender", "blender_cup",
         "campfire", "fryer", "fryer_basket", "glass_return", "glass_stack", "griddle", "oven", "pan", "pot", "skewer",
-        "toasting_fork", "roasting_tray", "tray_stack"
+        "toasting_fork", "roasting_tray", "tray_stack", "serving_tray", "mug_stack", "teleportal", "conveyor", "travelator", "ingredient_spray",
+        "attached_spawner", "condiment_switch", "condiment_dispenser"
     };
 
     private static readonly string[] StockHostGroups =
     {
         "Design/Collision", "Design/Animated Objects", "Design/Gameplay Stations", "Design/Work Surfaces",
         "Design/Cooking Stations", "Design/Utensils", "Design/Plates", "Design/Environment Objects", "Design/Floors",
+        "Design/Walls", "Design/KillPlanes", "Art/Lights/ColourTint", "Art/Lights/Light Shafts",
     };
 
-    private static MethodInfo stockSpawner;
+    private static MethodInfo stockSpawner, stockTeleportal;
+    private static MethodInfo stockConveyor, stockTravelator, stockSpray;
+    private static MethodInfo stockAttachedSpawner, stockSpawnTimers;
+    private static Type stockWeightedPrefab;
+    private static MethodInfo stockSwitchRelay, stockCondimentSwitcher, stockCondimentEffects, stockCondimentColors;
+    private static Type stockIngredientType, stockColorMaterial, stockColorParticle;
     private sealed record StockGridCell(string Id, object Location, object Item, object Index);
     private static MethodInfo stockCellCenter, stockCellOccupant, stockRemoveOccupant, stockInversePoint;
     private static (object Grid, StockGridCell[] Cells)? stockGridCheck;
@@ -33,6 +40,21 @@ public sealed partial class Plugin
     private static void InstallStockLayout(Assembly game, Assembly unity)
     {
         stockSpawner = GenericGameObjectMethod("GetComponent", game.GetType("PickupItemSpawner", true));
+        stockTeleportal = GenericGameObjectMethod("GetComponent", game.GetType("Teleportal", true));
+        stockConveyor = GenericGameObjectMethod("GetComponent", game.GetType("ConveyorStation", true));
+        stockTravelator = GenericGameObjectMethod("GetComponent", game.GetType("Travelator", true));
+        stockSpray = GenericGameObjectMethod("GetComponent", game.GetType("IngredientSpray", true));
+        var spawner = game.GetType("TriggerAttachedSpawn", true);
+        stockAttachedSpawner = GenericGameObjectMethod("GetComponent", spawner);
+        stockWeightedPrefab = game.GetType("TriggerAttachedSpawn+WeightedPrefab", true);
+        stockSpawnTimers = GenericGameObjectMethod("GetComponents", game.GetType("TriggerTimer", true));
+        stockSwitchRelay = GenericGameObjectMethod("GetComponent", game.GetType("TriggerOnObject", true));
+        stockCondimentSwitcher = GenericGameObjectMethod("GetComponent", game.GetType("PlacementItemSwitcher", true));
+        stockCondimentEffects = GenericGameObjectMethod("GetComponent", game.GetType("CondimentDispenserCosmeticDecisions", true));
+        stockCondimentColors = GenericGameObjectMethod("GetComponent", game.GetType("TriggerColourCycle", true));
+        stockIngredientType = game.GetType("IngredientOrderNode", true);
+        stockColorMaterial = unity.GetType("UnityEngine.Material", true);
+        stockColorParticle = Assembly.Load("UnityEngine.ParticleSystemModule").GetType("UnityEngine.ParticleSystem", true);
         var grid = game.GetType("QuadGridManager", true);
         var index = game.GetType("GridIndex", true);
         stockCellCenter = Find(grid, "GetPosFromGridLocation", new[] { index });
@@ -96,6 +118,10 @@ public sealed partial class Plugin
             var gridSize = Get(grid, "AccessGridHalfSize");
             restored.Push(() => Set(grid, "AccessGridHalfSize", gridSize));
             Set(grid, "AccessGridHalfSize", Activator.CreateInstance(stockPoint, 32, 8, 32));
+            var fallPlane = ResolveSceneObject(roots, "CampaignGameEnvironment/KillPlane");
+            var fallScale = Get(fallPlane, "localScale");
+            restored.Push(() => Set(fallPlane, "localScale", fallScale));
+            Set(fallPlane, "localScale", Vector(new[] { 16f, (float)Get(fallScale, "y"), 16f }));
             var render = ResolveSceneObject(roots, "MultiplayerGameCamera");
             var camera = stockCamera.Invoke(Get(render, "gameObject"), null);
             var span = kitchen.Stations.Max(row => row.Position[0]) - kitchen.Stations.Min(row => row.Position[0]);
@@ -134,12 +160,20 @@ public sealed partial class Plugin
                     var gameObject = Get(transform, "gameObject");
                     foreach (var location in Enumerate(kitchenGridLocations.Invoke(gameObject, new object[] { true })))
                         Set(location, "m_gridManager", grid);
+                    if (station.MotionSpeed is float speed)
+                    {
+                        var surface = station.Role == "travelator";
+                        var mechanism = (surface ? stockTravelator : stockConveyor).Invoke(gameObject, null)
+                            ?? throw new InvalidDataException($"Missing native moving surface for {station.Id}.");
+                        Set(mechanism, surface ? "m_speed" : "m_conveySpeed", speed);
+                    }
                     if (station.Ingredient != null)
                     {
-                        var itemSpawner = stockSpawner.Invoke(gameObject, null);
+                        var spray = station.Role == "ingredient_spray";
+                        var itemSpawner = (spray ? stockSpray : stockSpawner).Invoke(gameObject, null);
                         if (itemSpawner == null)
-                            throw new InvalidDataException($"No ingredient spawner for {station.Id}.");
-                        Set(itemSpawner, "m_itemPrefab", stockLoad.Ingredients[station.Ingredient]);
+                            throw new InvalidDataException($"No native ingredient source for {station.Id}.");
+                        Set(itemSpawner, spray ? "m_OrderPrefab" : "m_itemPrefab", stockLoad.Ingredients[station.Ingredient]);
                     }
                     if (station.Capacity > 0)
                     {
@@ -179,6 +213,21 @@ public sealed partial class Plugin
             }
 
             ConnectStockReturns(kitchen, placed);
+            foreach (var station in kitchen.Stations.Where(row => row.AttachedSpawn != null))
+                ConfigureStockAttachedSpawner(station, placed);
+            ConnectStockCondiments(kitchen, placed);
+            foreach (var station in kitchen.Stations.Where(row => row.PortalExit != null))
+            {
+                var portal = stockTeleportal.Invoke(Get(placed[station.Id], "gameObject"), null)
+                    ?? throw new InvalidDataException($"Missing native portal component for {station.Id}.");
+                Set(portal, "m_exitPortal", Get(placed[station.PortalExit], "gameObject"));
+                if (station.PortalDoubleSided)
+                {
+                    try { BuildStockPortalBack(placed[station.Id]); }
+                    catch (Exception error) { log.LogWarning($"BRIDGE_STOCK_PORTAL_BACK_FAILED {station.Id}: {error.Message}"); }
+                }
+                log.LogInfo($"BRIDGE_STOCK_PORTAL {station.Id} -> {station.PortalExit}");
+            }
             var origin = Get(grid, "AccessOrigin");
             restored.Push(() => Set(grid, "AccessOrigin", origin));
             AlignStockGrid(grid, kitchen, placed);
@@ -253,6 +302,81 @@ public sealed partial class Plugin
             syncPhysics.Invoke(null, null);
             throw;
         }
+    }
+
+    private static void ConnectStockCondiments(StockKitchen kitchen, Dictionary<string, object> placed)
+    {
+        var reversed = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var dispenser in kitchen.Stations.Where(row => row.CondimentItems != null))
+        {
+            var instance = Get(placed[dispenser.Id], "gameObject");
+            var switcher = stockCondimentSwitcher.Invoke(instance, null);
+            var ingredient = kitchenIngredientProperties.Invoke(instance, null);
+            var items = dispenser.CondimentItems
+                .Select(key => CastKitchenOrder(stockLoad.IngredientNodes[key], stockIngredientType)).ToArray();
+            if (switcher == null || ingredient == null || items.Any(item => item == null))
+                throw new InvalidDataException($"Missing native condiment components for {dispenser.Id}.");
+            var original = Enumerate(Get(switcher, "m_ingredients")).ToArray();
+            if (!Equals(Get(original[0], "m_uID"), Get(items[0], "m_uID")))
+            {
+                reversed.Add(dispenser.Id);
+                var effects = stockCondimentEffects.Invoke(instance, null);
+                SetNativeObjectArray(effects, "m_particleEffects", kitchenObjectType, Enumerate(Get(effects, "m_particleEffects")).Reverse());
+            }
+            SetNativeObjectArray(switcher, "m_ingredients", stockIngredientType, items);
+            Set(ingredient, "m_ingredientOrderNode", items[0]);
+        }
+        foreach (var button in kitchen.Stations.Where(row => row.CondimentTargets != null))
+        {
+            var instance = Get(placed[button.Id], "gameObject");
+            var relay = stockSwitchRelay.Invoke(instance, null) ??
+                throw new InvalidDataException($"Missing native condiment switch for {button.Id}.");
+            var targets = button.CondimentTargets.Select(id => Get(placed[id], "gameObject")).ToArray();
+            if (targets.Length == 1)
+                Set(relay, "m_targetObject", targets[0]);
+            else
+            {
+                Set(relay, "m_targetObject", null);
+                SetNativeObjectArray(relay, "m_targetObjects", kitchenObjectType, targets);
+            }
+            if (reversed.Contains(button.CondimentTargets[0]))
+            {
+                var colors = stockCondimentColors.Invoke(instance, null);
+                SetNativeObjectArray(colors, "m_materials", stockColorMaterial, Enumerate(Get(colors, "m_materials")).Reverse());
+                SetNativeObjectArray(colors, "m_glowEffects", stockColorParticle, Enumerate(Get(colors, "m_glowEffects")).Reverse());
+            }
+            log.LogInfo($"BRIDGE_STOCK_CONDIMENT_SWITCH {button.Id} -> {string.Join(", ", button.CondimentTargets)}");
+        }
+    }
+
+    private static void ConfigureStockAttachedSpawner(StockStation station, Dictionary<string, object> placed)
+    {
+        var feed = station.AttachedSpawn;
+        var gameObject = Get(placed[station.Id], "gameObject");
+        var spawner = stockAttachedSpawner.Invoke(gameObject, null) ??
+            throw new InvalidDataException($"Missing native automatic food source for {station.Id}.");
+        var selector = Get(spawner, "m_gridPointSelector") ??
+            throw new InvalidDataException($"Missing native conveyor selector for {station.Id}.");
+        var target = Get(placed[feed.Target], "position");
+        var height = (float)Get(Get(selector, "position"), "y");
+        Set(selector, "position", Vector(new[] { (float)Get(target, "x"), height, (float)Get(target, "z") }));
+        var recipes = feed.Items.Select((key, i) =>
+        {
+            var weighted = Activator.CreateInstance(stockWeightedPrefab, nonPublic: true);
+            Set(weighted, "AttachmentPrefab", stockLoad.Ingredients[key]);
+            Set(weighted, "m_weight", feed.Weights[i]);
+            return weighted;
+        });
+        SetNativeObjectArray(spawner, "m_attachmentPrefabs", stockWeightedPrefab, recipes);
+        Set(spawner, "m_spawnInOrder", feed.InOrder);
+
+        var timers = Enumerate(stockSpawnTimers.Invoke(gameObject, null)).ToArray();
+        var trigger = (string)Get(spawner, "m_trigger");
+        var repeating = timers.Single(timer => Equals(Get(timer, "m_startTrigger"), trigger));
+        var initial = timers.Single(timer => string.IsNullOrEmpty((string)Get(timer, "m_startTrigger")));
+        Set(repeating, "m_time", feed.Seconds);
+        Set(initial, "m_time", feed.AtStart ? .1f : feed.Seconds);
+        log.LogInfo($"BRIDGE_STOCK_FOOD_SOURCE {station.Id} -> {feed.Target} ({feed.Seconds}s)");
     }
 
     private static void AlignStockGrid(object grid, StockKitchen kitchen, Dictionary<string, object> placed)
@@ -351,7 +475,7 @@ public sealed partial class Plugin
             MapKitchenClone(source, transform, copies);
             var entityRows = RemapRegistry(prototype?.Entities ?? entityBaseline, copies);
             var componentRows = RemapRegistry(prototype?.Components ?? componentBaseline, copies);
-            if (entityRows.Length == 0)
+            if (entityRows.Length == 0 && station.Role != "travelator")
                 throw new InvalidDataException($"Native donor is missing entity registration: {station.Path}.");
             AddStockRegistry(entities, kitchenObjectType, entityRows);
             AddStockRegistry(components, kitchenComponentType, componentRows);

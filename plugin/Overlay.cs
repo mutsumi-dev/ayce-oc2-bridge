@@ -45,9 +45,25 @@ internal sealed class StockStation
     [JsonPropertyName("plateCount")] public int PlateCount { get; set; }
     [JsonPropertyName("returnStack")] public string ReturnStack { get; set; }
     [JsonPropertyName("returnStations")] public string[] ReturnStations { get; set; }
+    [JsonPropertyName("portalExit")] public string PortalExit { get; set; }
+    [JsonPropertyName("portalDoubleSided")] public bool PortalDoubleSided { get; set; }
+    [JsonPropertyName("motionSpeed")] public float? MotionSpeed { get; set; }
+    [JsonPropertyName("attachedSpawn")] public StockAttachedSpawn AttachedSpawn { get; set; }
+    [JsonPropertyName("condimentItems")] public string[] CondimentItems { get; set; }
+    [JsonPropertyName("condimentTargets")] public string[] CondimentTargets { get; set; }
     [JsonPropertyName("allowedIngredients")] public string[] AllowedIngredients { get; set; }
     [JsonPropertyName("unresolvedIngredients")] public string[] UnresolvedIngredients { get; set; }
     [JsonPropertyName("allowedCookingStationTypes")] public int[] AllowedCookingStationTypes { get; set; }
+}
+
+internal sealed class StockAttachedSpawn
+{
+    [JsonPropertyName("items")] public string[] Items { get; set; }
+    [JsonPropertyName("weights")] public float[] Weights { get; set; }
+    [JsonPropertyName("seconds")] public float Seconds { get; set; }
+    [JsonPropertyName("target")] public string Target { get; set; }
+    [JsonPropertyName("inOrder")] public bool InOrder { get; set; }
+    [JsonPropertyName("atStart")] public bool AtStart { get; set; }
 }
 
 internal sealed class StockRecipe

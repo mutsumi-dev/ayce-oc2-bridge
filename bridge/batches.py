@@ -3,10 +3,12 @@ from collections import Counter
 from .assets import ImportErrorDetail
 
 
+STATIC_BATCH = 'stock-recipes-static-layout'
+ADAPTATION_BATCH = 'stock-recipes-layout-or-rules'
 BATCHES = (
     'current-preview',
-    'stock-recipes-static-layout',
-    'stock-recipes-layout-or-rules',
+    STATIC_BATCH,
+    ADAPTATION_BATCH,
     'custom-recipe-definitions',
     'unmatched-recipe-assets',
     'unresolved-recipe-references',
@@ -82,7 +84,7 @@ def classify_level(level):
     elif unmatched:
         batch = 'unmatched-recipe-assets'
     else:
-        batch = 'stock-recipes-layout-or-rules' if flags else 'stock-recipes-static-layout'
+        batch = ADAPTATION_BATCH if flags else STATIC_BATCH
 
     return batch, {
         'layoutFlags': flags,

@@ -137,6 +137,12 @@ $catalog = Join-Path $game 'Overcooked All You Can Eat_Data\StreamingAssets\aa\W
 .\scripts\Install-StaticBatch.ps1 -GamePath $game -Package .\release\stock-test -ActiveOverlay .\release\dtsimple-4-layout.json
 ```
 
+针对要适配布局、机关或规则的原版菜谱关卡，将 `--batch stock-recipes-layout-or-rules` 加到 `prepare-static` 命令。转换结果会给出可打包关卡，以及每张暂缓关卡的原因。对该结果运行 `pack-static --only-prepared`，可生成当前能接入的关卡，测试包清单会保留暂缓列表。
+
+这批转换支持按源关卡人数规则开局。源配置中时长为零的人数不开放。《糕一（仅限四人）》和《糕一（单双三人）》因此保留各自的人数限制。传送门保留入口朝向、目的地和双面外观。彩橙色使用 AYCE 的普通橙色外观，深蓝色使用浅蓝色外观。原生传送带和移动地板保留源关卡的位置、朝向和速度。定时供料器保留物品、间隔、顺序与对应的传送带格子。喷料器按源配置绑定配料。能确认目标的酱料按钮沿用原版番茄酱和芥末的切换规则，源关卡中只转发即时切换信号的动画使用 AYCE 的按钮动画。《单人旅途 2》和《单人旅途 3》开放单人模式，AYCE 的两个可切换厨师从厨房内开局。涉及未支持的机关组合、动画或碰撞的关卡会列入暂缓列表。
+
+`pack-static` 从本机 AYCE 读取实际订单节点、食材预制体的处理结果以及炸篮、搅拌碗和榨汁杯的允许列表。缺少必需食材，或没有兼容厨具的订单会阻止该关卡打包。测试包的 `foodAudit` 字段保存每张图的检查结果。
+
 在 Steam 离线模式下启动游戏，打开 **战役模式 → 配菜关卡 → 自定义关卡**。可先用「暴吵萌厨 1-1」验证取菜、切菜、装盘、交付和结算，再用「星火夜话」验证篝火和烤具。「十二生肖-戌狗」可用于检验同一关里的搅拌、油炸和烤串。物理边界独立于美术渲染，空气墙在游戏中不可见。原发布包提供的静态网格和贴图随关卡导入，装饰引用有匹配时复用本机 AYCE 模型，其余区域使用主题地面。关卡原始光照、动画、美术脚本和未匹配的模型仍需适配。实机运行时可用 `BRIDGE_STOCK_AUTHORED_ART`、`BRIDGE_STOCK_VISUALS` 和 `BRIDGE_LOCAL_SCORE` 核对每关。遇到载入失败时保存包含 `BRIDGE_STOCK_PREPARATION_FAILED` 或 `BRIDGE_KITCHEN_REJECTED` 的日志。
 
 ## 构建

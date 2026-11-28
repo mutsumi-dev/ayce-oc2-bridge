@@ -94,7 +94,7 @@ def mesh_bytes(obj):
     return encoded.getvalue()
 
 
-def export_scene_art(bundles, scene_file, output, native_models=()):
+def export_scene_art(bundles, scene_file, output, native_models=(), *, include_roots=None, exclude_roots=()):
     scene = list(bundles.entry(scene_file, ('MeshFilter', 'MeshRenderer')))
     games = {a.key: a for a in scene if a.obj.type.name == 'GameObject'}
     transforms, filters, renderers, stubs = {}, {}, {}, []
@@ -133,6 +133,16 @@ def export_scene_art(bundles, scene_file, output, native_models=()):
     statistics = Counter()
     models = {name.casefold(): name for name in native_models}
     model_cache = {}
+
+    def visible_path(lineage):
+        if not lineage or not all(games[key].tree['m_IsActive'] for key in lineage):
+            return None
+        names = tuple(games[key].tree['m_Name'] for key in lineage)
+        if ((include_roots is not None and not any(names[:len(root)] == root for root in include_roots))
+                or any(names[:len(root)] == root for root in exclude_roots)):
+            statistics['excludedByPath'] += 1
+            return None
+        return names
 
     def ensure_nodes(lineage):
         parent = -1
@@ -213,10 +223,12 @@ def export_scene_art(bundles, scene_file, output, native_models=()):
 
         for key, renderer in renderers.items():
             mesh_filter = filters.get(key)
-            lineage = chain(key)
-            if mesh_filter is None or not lineage or not all(games[k].tree['m_IsActive'] for k in lineage):
+            if mesh_filter is None:
                 continue
-            names = [games[k].tree['m_Name'] for k in lineage]
+            lineage = chain(key)
+            names = visible_path(lineage)
+            if names is None:
+                continue
             if names[0] in NON_ART_ROOTS or any('airwall' in name.casefold() or
                     re.fullmatch(r'shadows?(?: \(\d+\))?', name.casefold()) for name in names):
                 continue
@@ -254,12 +266,13 @@ def export_scene_art(bundles, scene_file, output, native_models=()):
 
         for key, stub in stubs:
             lineage = chain(key)
-            if not lineage or not all(games[item].tree['m_IsActive'] for item in lineage):
+            names = visible_path(lineage)
+            if names is None:
                 continue
             source = bundles.describe_reference(stub, stub.tree.get('pseudoPrefabSO')) or {}
             path = source.get('assetPath', '')
             path_lower = path.replace('\\', '/').casefold()
-            parent = games[lineage[0]].tree['m_Name']
+            parent = names[0]
             if not path or (parent != 'Art' and not any(part in path_lower for part in ('/dressing', '/beach theme/', '/themes/'))):
                 continue
             if not bounded(lineage):

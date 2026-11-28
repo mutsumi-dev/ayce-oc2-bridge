@@ -98,11 +98,13 @@ public sealed partial class Plugin
 
     private static IEnumerable<object> StockTrayOrderNodes(StockLoad state, StockKitchen kitchen)
     {
-        var supplies = kitchen.Stations.Where(row => row.Role == "plate_supply").Select(row => row.ReturnStack).Distinct();
-        foreach (var path in supplies)
+        var supplies = kitchen.Stations.Where(row => row.Role == "plate_supply").Select(row => row.ReturnStack).Distinct()
+            .Select(path => kitchenPlateStack.Invoke(state.Ingredients[path], null))
+            .Where(stack => stack != null).Select(stack => Get(stack, "m_platePrefab"));
+        var individualTrays = kitchen.Stations.Where(row => row.Role == "serving_tray").Select(row => row.Path).Distinct()
+            .Select(path => state.Ingredients[path]);
+        foreach (var vessel in supplies.Concat(individualTrays))
         {
-            var stack = kitchenPlateStack.Invoke(state.Ingredients[path], null);
-            var vessel = stack == null ? null : Get(stack, "m_platePrefab");
             var tray = vessel == null ? null : kitchenTray.Invoke(vessel, null);
             if (tray == null || Get(tray, "m_slots") is not object slots)
                 continue;

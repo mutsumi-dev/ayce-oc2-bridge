@@ -64,11 +64,11 @@ public sealed partial class Plugin
 
     private static int LocalPlayerCount() => (int)countLocalUsers.Invoke(null, null);
 
-    private static void BeginStandaloneLevel(Overlay level)
+    private static bool BeginStandaloneLevel(Overlay level)
     {
         ExpireCustomRestart();
         if (standaloneRequest != null || CustomLaunchPending || sceneHandle != null)
-            return;
+            return false;
         if ((bool)isSteamLoggedOn.Invoke(null, null) || (int)countRemoteUsers.Invoke(null, null) != 0)
             throw new InvalidOperationException("Standalone kitchens require Steam Offline Mode and local players.");
         var players = LocalPlayerCount();
@@ -88,6 +88,7 @@ public sealed partial class Plugin
             var wrapper = wrapFrontendRoutine.Invoke(null, new object[] { PrepareStandaloneKitchen(request, routine) });
             standaloneCoroutine = startFrontendRoutine.Invoke(frontend, new[] { wrapper });
             log.LogInfo($"BRIDGE_STANDALONE_PREPARING kitchen={level.Name} players={players}");
+            return true;
         }
         catch
         {

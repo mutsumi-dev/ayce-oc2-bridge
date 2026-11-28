@@ -13,7 +13,7 @@ using HarmonyLib;
 
 namespace AyceOc2Bridge;
 
-[BepInPlugin(Id, "AYCE OC2 Bridge", "0.7.8")]
+[BepInPlugin(Id, "AYCE OC2 Bridge", "0.8.7")]
 public sealed partial class Plugin : BasePlugin
 {
     internal const string Id = "dev.ayce.oc2bridge";

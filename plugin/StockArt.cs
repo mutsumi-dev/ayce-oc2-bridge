@@ -352,6 +352,32 @@ public sealed partial class Plugin
         return count;
     }
 
+    private static void BuildStockPortalBack(object portal)
+    {
+        if (!stockArtReady)
+            return;
+        var find = Find(kitchenTransformType, "Find", new[] { typeof(string) });
+        var front = find.Invoke(portal, new object[] { "Portal" });
+        if (front == null)
+            return;
+        var back = Activator.CreateInstance(kitchenObjectType, "Portal back");
+        var transform = Get(back, "transform");
+        Parent(transform, portal);
+        Set(transform, "localPosition", Get(front, "localPosition"));
+        Set(transform, "localScale", Get(front, "localScale"));
+        Set(transform, "localRotation", Rotation(new[] { 0f, .7071068f, 0f, .7071068f }));
+        foreach (var rim in Children(front).Where(child => (string)Get(child, "name") is "m_wizard_portal_01" or "m_wizard_portal_02"))
+        {
+            var piece = Activator.CreateInstance(kitchenObjectType, (string)Get(rim, "name"));
+            var child = Get(piece, "transform");
+            Parent(child, transform);
+            Set(child, "localPosition", Get(rim, "localPosition"));
+            Set(child, "localScale", Get(rim, "localScale"));
+            Set(child, "localRotation", Get(rim, "localRotation"));
+            CopyVisualModel(rim, child);
+        }
+    }
+
     private static int DrawAuthoredArt(object room, StockKitchen kitchen, object shader)
     {
         var art = stockLoad.Art;
@@ -477,6 +503,20 @@ public sealed partial class Plugin
         try
         {
             var drawn = DrawAuthoredArt(parent, kitchen, shader);
+            var stoneWalls = kitchen.Boxes.Where(box => box.Layer != 9 &&
+                box.Path?.Split('/')[^1].StartsWith("Beach_stonewall_", StringComparison.OrdinalIgnoreCase) == true).ToArray();
+            if (floors.Length > 0 && stoneWalls.Length > 0)
+            {
+                var stone = shader == null ? null : MakeArtMaterial(shader, new[] { .45f, .41f, .35f, 1f }, null, new[] { 1f, 1f });
+                var baseline = floors.Min(box => box.Position[1] + box.Size[1] / 2);
+                foreach (var wall in stoneWalls)
+                {
+                    var marker = CreateKitchenCube(parent, "Stone wall", new[] { wall.Position[0], baseline + .24f, wall.Position[2] },
+                        wall.Rotation, new[] { wall.Size[0], .48f, wall.Size[2] }, 0, collision: false, visible: true);
+                    if (stone != null)
+                        Set(kitchenMeshRenderer.Invoke(marker, null), "sharedMaterial", stone);
+                }
+            }
             if (shader != null && floors.Length > 0)
             {
                 var edgeMaterial = MakeArtMaterial(shader, new[] { .25f, .24f, .21f, 1f }, null, new[] { 1f, 1f });
